@@ -11,6 +11,9 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
 from pathlib import Path
+import os
+from dotenv import load_dotenv
+load_dotenv()
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -25,11 +28,36 @@ SECRET_KEY = 'django-insecure-5c5y^ry^y$!&nj@it%&iegdn&6-moi=x^(!ja0_1-7@r2%&$k^
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ["*"]
+CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOWED_ORIGINS = [
+    "https://localhost:3000",
+    "http://localhost:3000",
+    f'https://{os.getenv("FRONTEND_HOST")}',
+    f'http://{os.getenv("FRONTEND_HOST")}',
+    f'https://{os.getenv("BACKEND_HOST")}',
+    f'http://{os.getenv("BACKEND_HOST")}'
+]
 
+CSRF_TRUSTED_ORIGINS = [
+    "https://localhost:3000",
+    "http://localhost:3000",
+    f'https://{os.getenv("FRONTEND_HOST")}',
+    f'http://{os.getenv("FRONTEND_HOST")}',
+    f'https://{os.getenv("BACKEND_HOST")}',
+    f'http://{os.getenv("BACKEND_HOST")}'
+]
+
+# Security settings for Cloudflare / Proxy
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+CSRF_COOKIE_SAMESITE = 'None'
+CSRF_COOKIE_SECURE = True
+CSRF_COOKIE_HTTPONLY = False # Allow JS to read the cookie
+SESSION_COOKIE_SAMESITE = 'None'
+SESSION_COOKIE_SECURE = True
 
 # Application definition
-
+ 
 INSTALLED_APPS = [
     'django.contrib.admin',
     'django.contrib.auth',
