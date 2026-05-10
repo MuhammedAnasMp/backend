@@ -3,8 +3,16 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from django.contrib.auth.models import User
+from rest_framework_simplejwt.tokens import RefreshToken
 from .firebase_auth import verify_firebase_token
-from .models import InstagramAccount
+from .models import InstagramAccount, AppUser
+
+def get_tokens_for_user(user):
+    refresh = RefreshToken.for_user(user)
+    return {
+        'refresh': str(refresh),
+        'access': str(refresh.access_token),
+    }
 
 class FirebaseLoginView(APIView):
     def post(self, request):
@@ -20,37 +28,52 @@ class FirebaseLoginView(APIView):
         email = decoded_token.get('email')
         name = decoded_token.get('name', '')
         
-        # Get or create user
+        # 1. Resolve Django User
         user, created = User.objects.get_or_create(username=uid, defaults={'email': email, 'first_name': name})
+        
+        # 2. Resolve AppUser (Primary Identity)
+        app_user, au_created = AppUser.objects.get_or_create(user=user, defaults={'firebase_uid': uid})
+        
+        # Update login methods
+        method = "google" if "google" in decoded_token.get('firebase', {}).get('sign_in_provider', '') else "email"
+        if method not in app_user.login_methods:
+            app_user.login_methods.append(method)
+            app_user.save()
+
+        # 3. Load connected accounts info
+        instagram_accounts = InstagramAccount.objects.filter(app_user=app_user)
+        
+        # 4. Generate JWT tokens
+        tokens = get_tokens_for_user(user)
         
         return Response({
             'message': 'Login successful',
+            'tokens': tokens,
             'user': {
                 'id': user.id,
                 'username': user.username,
                 'email': user.email,
-                'name': user.first_name
-            }
+                'name': user.first_name,
+                'login_methods': app_user.login_methods,
+                'active_instagram_account_id': app_user.active_instagram_account_id
+            },
+            'connected_instagram_accounts': [
+                {'id': acc.id, 'username': acc.username, 'instagram_id': acc.instagram_user_id}
+                for acc in instagram_accounts
+            ]
         }, status=status.HTTP_200_OK)
 
 class InstagramLoginView(APIView):
     def post(self, request):
         access_token = request.data.get('access_token')
-        instagram_id = request.data.get('instagram_id') # Optional if we use /me
         
         if not access_token:
             return Response({'error': 'access_token is required'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            # Fetch user info from Instagram Graph API (v25.0 as mentioned by user)
-            # Note: v25.0 might be a typo for 21.0 or similar, but I'll use the user's version if provided or default to latest.
-            # Actually, Graph API versions are like v21.0. 25.0 might be future or a specific business version.
-            # I'll use v21.0 or just 'me' which usually points to the latest supported.
-            
-            ig_api_version = "v21.0" # Fallback to a valid one if 25.0 is too high
-            
+            # Verify with Instagram
             response = requests.get(
-                f"https://graph.instagram.com/me",
+                "https://graph.instagram.com/me",
                 params={
                     'fields': 'id,username,account_type',
                     'access_token': access_token
@@ -58,44 +81,78 @@ class InstagramLoginView(APIView):
             )
             
             if response.status_code != 200:
-                return Response({
-                    'error': 'Invalid Instagram token',
-                    'details': response.json()
-                }, status=status.HTTP_401_UNAUTHORIZED)
+                return Response({'error': 'Invalid Instagram token', 'details': response.json()}, status=status.HTTP_401_UNAUTHORIZED)
             
             data = response.json()
             ig_id = data.get('id')
             ig_username = data.get('username')
             
-            # Find or create InstagramAccount
-            ig_account = InstagramAccount.objects.filter(instagram_id=ig_id).first()
+            # Check if this Instagram account is already known
+            ig_account = InstagramAccount.objects.filter(instagram_user_id=ig_id).first()
             
-            if ig_account:
-                # Update existing account
-                ig_account.access_token = access_token
-                ig_account.username = ig_username
-                ig_account.save()
-                user = ig_account.user
-            else:
-                # Create new Django User and InstagramAccount
-                # Use instagram username as base for Django username
-                django_username = f"ig_{ig_username}_{ig_id}"
-                user, created = User.objects.get_or_create(username=django_username)
+            if request.user.is_authenticated:
+                # Account Linking Mode
+                app_user = getattr(request.user, 'app_profile', None)
+                if not app_user:
+                    app_user = AppUser.objects.create(user=request.user)
                 
-                ig_account = InstagramAccount.objects.create(
-                    user=user,
-                    instagram_id=ig_id,
-                    username=ig_username,
-                    access_token=access_token
-                )
+                if ig_account:
+                    ig_account.access_token = access_token
+                    ig_account.username = ig_username
+                    ig_account.app_user = app_user 
+                    ig_account.save()
+                else:
+                    ig_account = InstagramAccount.objects.create(
+                        app_user=app_user,
+                        instagram_user_id=ig_id,
+                        username=ig_username,
+                        access_token=access_token
+                    )
+            else:
+                # Entry Login Mode
+                if ig_account:
+                    app_user = ig_account.app_user
+                    user = app_user.user
+                    ig_account.access_token = access_token
+                    ig_account.username = ig_username
+                    ig_account.save()
+                else:
+                    django_username = f"ig_{ig_username}_{ig_id}"
+                    user, created = User.objects.get_or_create(username=django_username)
+                    app_user, au_created = AppUser.objects.get_or_create(user=user)
+                    
+                    ig_account = InstagramAccount.objects.create(
+                        app_user=app_user,
+                        instagram_user_id=ig_id,
+                        username=ig_username,
+                        access_token=access_token
+                    )
+            
+            # Update login methods
+            if "instagram" not in app_user.login_methods:
+                app_user.login_methods.append("instagram")
+            
+            # Auto-set active account if none selected
+            if not app_user.active_instagram_account:
+                app_user.active_instagram_account = ig_account
+            
+            app_user.save()
+            
+            # Generate JWT tokens
+            tokens = get_tokens_for_user(app_user.user)
 
             return Response({
-                'message': 'Instagram login successful',
+                'message': 'Instagram action successful',
+                'tokens': tokens,
                 'user': {
-                    'id': user.id,
-                    'username': user.username,
-                    'instagram_username': ig_account.username,
-                    'instagram_id': ig_account.instagram_id
+                    'id': app_user.user.id,
+                    'username': app_user.user.username,
+                    'active_instagram_account_id': app_user.active_instagram_account_id
+                },
+                'instagram_account': {
+                    'id': ig_account.id,
+                    'username': ig_account.username,
+                    'instagram_id': ig_account.instagram_user_id
                 }
             }, status=status.HTTP_200_OK)
 
