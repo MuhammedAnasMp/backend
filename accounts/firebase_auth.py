@@ -27,8 +27,17 @@ if not firebase_admin._apps:
 
 def verify_firebase_token(id_token):
     try:
-        decoded_token = auth.verify_id_token(id_token)
+        # clock_skew_seconds=5 tolerates minor clock drift between client and Google servers
+        decoded_token = auth.verify_id_token(id_token, clock_skew_seconds=5)
         return decoded_token
     except Exception as e:
         print(f"Error verifying token: {e}")
+        return None
+
+def create_custom_token(uid):
+    try:
+        custom_token = auth.create_custom_token(uid)
+        return custom_token.decode('utf-8')
+    except Exception as e:
+        print(f"Error creating custom token: {e}")
         return None

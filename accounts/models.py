@@ -1,11 +1,10 @@
 from django.db import models
-from django.contrib.auth.models import User
+from django.contrib.auth.models import AbstractUser
+from django.conf import settings
 
-class AppUser(models.Model):
-    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='app_profile')
+class User(AbstractUser):
     firebase_uid = models.CharField(max_length=255, unique=True, null=True, blank=True)
     login_methods = models.JSONField(default=list)  # e.g., ["google", "email", "instagram"]
-    created_at = models.DateTimeField(auto_now_add=True)
     
     # The active account working context
     active_instagram_account = models.ForeignKey(
@@ -17,15 +16,17 @@ class AppUser(models.Model):
     )
 
     def __str__(self):
-        return f"AppUser: {self.user.username}"
+        return f"User: {self.username}"
 
 class InstagramAccount(models.Model):
-    app_user = models.ForeignKey(AppUser, on_delete=models.CASCADE, related_name='instagram_accounts')
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='instagram_accounts')
     instagram_user_id = models.CharField(max_length=255, unique=True)
     username = models.CharField(max_length=255)
+    full_name = models.CharField(max_length=255, blank=True, null=True)
     access_token = models.TextField()
     refresh_token = models.TextField(blank=True, null=True)
     profile_picture_url = models.URLField(max_length=500, blank=True, null=True)
+    used_for_login = models.BooleanField(default=True)
     connected_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
