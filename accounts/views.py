@@ -1,13 +1,37 @@
 import requests
+import base64
+import hashlib
+import hmac
+import json
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework_simplejwt.tokens import RefreshToken
-from .firebase_auth import verify_firebase_token
+from .firebase_auth import verify_firebase_token, delete_firebase_user
 from .models import InstagramAccount
 from django.contrib.auth import get_user_model
 from django.conf import settings
 User = get_user_model()
+
+def parse_signed_request(signed_request):
+    try:
+        encoded_sig, payload = signed_request.split('.', 2)
+        sig = base64.urlsafe_b64decode(encoded_sig + '=' * (4 - len(encoded_sig) % 4))
+        data = json.loads(base64.urlsafe_b64decode(payload + '=' * (4 - len(payload) % 4)).decode('utf-8'))
+        
+        # Verify signature
+        expected_sig = hmac.new(
+            settings.INSTAGRAM_CLIENT_SECRET.encode('utf-8'),
+            payload.encode('utf-8'),
+            hashlib.sha256
+        ).digest()
+        
+        if sig != expected_sig:
+            return None
+        return data
+    except Exception as e:
+        print(f"Error parsing signed request: {e}")
+        return None
 
 def get_tokens_for_user(user):
     refresh = RefreshToken.for_user(user)
@@ -106,7 +130,9 @@ class FirebaseLoginView(APIView):
                         'username': acc.username,
                         'profile_picture_url': acc.profile_picture_url,
                         'used_for_login': acc.used_for_login,
-                    } for acc in instagram_accounts
+                        'is_active': acc.is_active,
+                        'is_enabled': acc.is_enabled,
+                    } for acc in instagram_accounts if acc.is_active
                 ]
             }, status=status.HTTP_200_OK)
         except Exception as e:
@@ -193,6 +219,14 @@ class InstagramLoginView(APIView):
                     user.first_name = ig_full_name
                     user.save()
                 
+                # Check for ownership conflict
+                existing_account = InstagramAccount.objects.filter(instagram_user_id=ig_id).first()
+                if existing_account and existing_account.user != user and existing_account.is_active:
+                    return Response({
+                        'error': 'Account already in use',
+                        'details': f'Instagram account @{ig_username} is already linked to another AnyDm user. Please disconnect it from the other account first.'
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
                 ig_account, created = InstagramAccount.objects.update_or_create(
                     instagram_user_id=ig_id,
                     defaults={
@@ -201,7 +235,8 @@ class InstagramLoginView(APIView):
                         'full_name': ig_full_name,
                         'access_token': access_token,
                         'profile_picture_url': ig_profile_pic,
-                        'used_for_login': True
+                        'used_for_login': True,
+                        'is_active': True
                     }
                 )
                 print(f"[InstagramLogin] Linked account {ig_username} to User(id={user.id}). Created: {created}")
@@ -210,34 +245,62 @@ class InstagramLoginView(APIView):
                 # Check if this account already exists
                 ig_account = InstagramAccount.objects.filter(instagram_user_id=ig_id).first()
                 
-                if ig_account:
+                if ig_account and ig_account.user:
+                    # Enforce user-defined login restrictions
+                    if not ig_account.used_for_login:
+                        return Response({
+                            'error': 'Login Restricted',
+                            'details': f'Login with @{ig_username} is disabled for this AnyDm account. Please log in with another account or method.'
+                        }, status=status.HTTP_403_FORBIDDEN)
+                    
+
+
                     user = ig_account.user
                     # Update info
                     ig_account.username = ig_username
                     ig_account.access_token = access_token
                     ig_account.profile_picture_url = ig_profile_pic
-                    ig_account.used_for_login = True
+                    ig_account.is_active = True # Reactivate if it was soft-deleted
                     ig_account.save()
-                    print(f"[InstagramLogin] Logging in existing User(id={user.id}) via IG account {ig_username}")
+                    print(f"[InstagramLogin] Logging in User(id={user.id}) via IG account {ig_username}.")
                 else:
-                    # Create new user for this new IG account
-                    print(f"[InstagramLogin] New IG account {ig_username}. Creating new user.")
+                    # Detached or new account: needs a user
+                    if ig_account and not ig_account.user:
+                        print(f"[InstagramLogin] Claiming detached IG account {ig_username}.")
+                        # We still need a user. If this is a detached account, 
+                        # it means the previous owner unlinked it. 
+                        # We create a new user for it or find one?
+                        # For simplicity, let's treat it as a new user registration for this IG.
+                        pass
+                    
+                    print(f"[InstagramLogin] Creating/Finding user for IG account {ig_username}.")
                     django_username = f"ig_{ig_username}_{ig_id}"
                     user, user_created = User.objects.get_or_create(
                         username=django_username,
                         defaults={'first_name': ig_full_name}
                     )
                     
-                    ig_account = InstagramAccount.objects.create(
-                        user=user,
-                        instagram_user_id=ig_id,
-                        username=ig_username,
-                        full_name=ig_full_name,
-                        access_token=access_token,
-                        profile_picture_url=ig_profile_pic,
-                        used_for_login=True
-                    )
-                    print(f"[InstagramLogin] Created new User(id={user.id}) for IG account. Created: {user_created}")
+                    if ig_account:
+                        ig_account.user = user
+                        ig_account.username = ig_username
+                        ig_account.full_name = ig_full_name
+                        ig_account.access_token = access_token
+                        ig_account.profile_picture_url = ig_profile_pic
+                        ig_account.used_for_login = True
+                        ig_account.is_active = True
+                        ig_account.save()
+                    else:
+                        ig_account = InstagramAccount.objects.create(
+                            user=user,
+                            instagram_user_id=ig_id,
+                            username=ig_username,
+                            full_name=ig_full_name,
+                            access_token=access_token,
+                            profile_picture_url=ig_profile_pic,
+                            used_for_login=True,
+                            is_active=True
+                        )
+                    print(f"[InstagramLogin] Associated User(id={user.id}) with IG account. Created: {not bool(ig_account)}")
             
             # Update login methods safely
             stored_methods = user.login_methods if isinstance(user.login_methods, list) else []
@@ -245,9 +308,8 @@ class InstagramLoginView(APIView):
                 stored_methods.append("instagram")
                 user.login_methods = stored_methods
             
-            # Auto-set active account if none selected
-            if not user.active_instagram_account:
-                user.active_instagram_account = ig_account
+            # Set the Instagram account used for login as the active context
+            user.active_instagram_account = ig_account
             
             # Ensure firebase_uid is set for consistent identity
             if not user.firebase_uid:
@@ -279,7 +341,8 @@ class InstagramLoginView(APIView):
                     'username': ig_account.username,
                     'instagram_id': ig_account.instagram_user_id,
                     'profile_picture_url': ig_account.profile_picture_url,
-                    'used_for_login': ig_account.used_for_login
+                    'used_for_login': ig_account.used_for_login,
+                    'is_enabled': ig_account.is_enabled
                 }
             }, status=status.HTTP_200_OK)
 
@@ -319,20 +382,65 @@ class GetConnectedInstagramAccountsView(APIView):
             return Response({'error': 'Authentication required'}, status=status.HTTP_401_UNAUTHORIZED)
             
         user = request.user
-        instagram_accounts = InstagramAccount.objects.filter(user=user)
+        instagram_accounts = InstagramAccount.objects.filter(user=user, is_active=True)
         accounts_data = [
             {
                 'id': acc.id, 
                 'username': acc.username, 
                 'instagram_id': acc.instagram_user_id,
                 'profile_picture_url': acc.profile_picture_url,
-                'used_for_login': acc.used_for_login
+                'used_for_login': acc.used_for_login,
+                'is_enabled': acc.is_enabled
             }
             for acc in instagram_accounts
         ]
         
         return Response({'accounts': accounts_data}, status=status.HTTP_200_OK)
         
+class InstagramDeauthorizeView(APIView):
+    """
+    Called by Facebook when a user deauthorizes the Instagram app.
+    """
+    def post(self, request):
+        signed_request = request.data.get('signed_request')
+        if not signed_request:
+            return Response({'error': 'No signed_request provided'}, status=status.HTTP_400_BAD_REQUEST)
+            
+        data = parse_signed_request(signed_request)
+        if not data:
+            return Response({'error': 'Invalid signed_request'}, status=status.HTTP_400_BAD_REQUEST)
+            
+        ig_id = data.get('user_id')
+        if ig_id:
+            # Mark the account as not used for login or delete tokens
+            InstagramAccount.objects.filter(instagram_user_id=ig_id).update(
+                access_token="",
+                used_for_login=False
+            )
+            print(f"[InstagramDeauthorize] Deauthorized Instagram ID: {ig_id}")
+            
+        return Response({'status': 'deauthorized'}, status=status.HTTP_200_OK)
+
+class InstagramDataDeletionView(APIView):
+    """
+    Facebook Data Deletion Request Callback.
+    """
+    def post(self, request):
+        signed_request = request.data.get('signed_request')
+        if not signed_request:
+            return Response({'error': 'No signed_request provided'}, status=status.HTTP_400_BAD_REQUEST)
+            
+        data = parse_signed_request(signed_request)
+        if not data:
+            return Response({'error': 'Invalid signed_request'}, status=status.HTTP_400_BAD_REQUEST)
+            
+        user_id = data.get('user_id')
+        # Return the required Facebook response format
+        return Response({
+            'url': f'https://{request.get_host()}/api/accounts/auth/instagram/deletion-status/?id={user_id}',
+            'confirmation_code': f'del_{user_id}'
+        }, status=status.HTTP_200_OK)
+
 class UpdateProfileView(APIView):
     def post(self, request):
         if not request.user.is_authenticated:
@@ -346,3 +454,92 @@ class UpdateProfileView(APIView):
             return Response({'message': 'Profile updated successfully', 'display_name': user.first_name})
             
         return Response({'error': 'display_name is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+class RemoveInstagramAccountView(APIView):
+    """
+    Deletes an Instagram account link for the authenticated user.
+    """
+    def post(self, request):
+        if not request.user.is_authenticated:
+            return Response({'error': 'Authentication required'}, status=status.HTTP_401_UNAUTHORIZED)
+            
+        account_id = request.data.get('account_id')
+        if not account_id:
+            return Response({'error': 'account_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+            
+        try:
+            user = request.user
+            ig_account = InstagramAccount.objects.get(id=account_id, user=user)
+            username = ig_account.username
+            
+            # Check if this is the last login method
+            other_methods = [m for m in user.login_methods if m != "instagram"]
+            active_ig_accounts = InstagramAccount.objects.filter(user=user, is_active=True)
+            active_ig_count = active_ig_accounts.count()
+            
+            is_last_resort = (len(other_methods) == 0 and active_ig_count == 1)
+            
+            # 1. Detach the Instagram account first
+            ig_account.is_active = False
+            ig_account.user = None
+            ig_account.access_token = ""
+            ig_account.refresh_token = ""
+            ig_account.save()
+            print(f"[RemoveInstagramAccount] Detached IG: {username}")
+
+            # 2. If no other ways to log in, delete the user profile
+            if is_last_resort:
+                firebase_uid = user.firebase_uid
+                if firebase_uid:
+                    delete_firebase_user(firebase_uid)
+                
+                print(f"[RemoveInstagramAccount] Deleting User(id={user.id}) as no login methods remain.")
+                user.delete()
+                return Response({'message': 'Profile and data removed successfully', 'user_deleted': True}, status=status.HTTP_200_OK)
+            
+            return Response({'message': 'Account removed successfully', 'user_deleted': False}, status=status.HTTP_200_OK)
+        except InstagramAccount.DoesNotExist:
+            return Response({'error': 'Account not found or access denied.'}, status=status.HTTP_404_NOT_FOUND)
+
+class ToggleInstagramEnabledView(APIView):
+    """
+    Toggles the is_enabled status (Actions/Webhooks) for an Instagram account.
+    """
+    def post(self, request):
+        if not request.user.is_authenticated:
+            return Response({'error': 'Authentication required'}, status=status.HTTP_401_UNAUTHORIZED)
+            
+        account_id = request.data.get('account_id')
+        is_enabled = request.data.get('is_enabled')
+        
+        if account_id is None or is_enabled is None:
+            return Response({'error': 'account_id and is_enabled are required'}, status=status.HTTP_400_BAD_REQUEST)
+            
+        try:
+            ig_account = InstagramAccount.objects.get(id=account_id, user=request.user)
+            ig_account.is_enabled = bool(is_enabled)
+            ig_account.save()
+            return Response({'message': 'Status updated', 'is_enabled': ig_account.is_enabled}, status=status.HTTP_200_OK)
+        except InstagramAccount.DoesNotExist:
+            return Response({'error': 'Account not found or access denied.'}, status=status.HTTP_404_NOT_FOUND)
+
+class SetActiveInstagramAccountView(APIView):
+    def post(self, request):
+        if not request.user.is_authenticated:
+            return Response({'error': 'Authentication required'}, status=status.HTTP_401_UNAUTHORIZED)
+            
+        account_id = request.data.get('account_id')
+        if account_id is None:
+            return Response({'error': 'account_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+            
+        try:
+            user = request.user
+            ig_account = InstagramAccount.objects.get(id=account_id, user=user, is_active=True)
+            user.active_instagram_account = ig_account
+            user.save()
+            return Response({
+                'message': 'Active account updated',
+                'active_instagram_account_id': user.active_instagram_account_id
+            }, status=status.HTTP_200_OK)
+        except InstagramAccount.DoesNotExist:
+            return Response({'error': 'Account not found or access denied.'}, status=status.HTTP_404_NOT_FOUND)

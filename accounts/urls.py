@@ -4,7 +4,12 @@ from .views import (
     InstagramLoginView, 
     ToggleInstagramLoginView, 
     GetConnectedInstagramAccountsView,
-    UpdateProfileView
+    UpdateProfileView,
+    InstagramDeauthorizeView,
+    InstagramDataDeletionView,
+    RemoveInstagramAccountView,
+    ToggleInstagramEnabledView,
+    SetActiveInstagramAccountView
 )
 
 urlpatterns = [
@@ -13,4 +18,9 @@ urlpatterns = [
     path('auth/instagram/toggle-login/', ToggleInstagramLoginView.as_view(), name='instagram-toggle-login'),
     path('auth/instagram/accounts/', GetConnectedInstagramAccountsView.as_view(), name='instagram-accounts'),
     path('profile/update/', UpdateProfileView.as_view(), name='profile-update'),
+    path('auth/instagram/deauthorize/', InstagramDeauthorizeView.as_view(), name='instagram-deauthorize'),
+    path('auth/instagram/delete-data/', InstagramDataDeletionView.as_view(), name='instagram-delete-data'),
+    path('auth/instagram/remove/', RemoveInstagramAccountView.as_view(), name='instagram-remove'),
+    path('auth/instagram/toggle-enabled/', ToggleInstagramEnabledView.as_view(), name='instagram-toggle-enabled'),
+    path('auth/instagram/set-active/', SetActiveInstagramAccountView.as_view(), name='instagram-set-active'),
 ]

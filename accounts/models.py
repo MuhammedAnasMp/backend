@@ -19,7 +19,7 @@ class User(AbstractUser):
         return f"User: {self.username}"
 
 class InstagramAccount(models.Model):
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='instagram_accounts')
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, related_name='instagram_accounts', null=True, blank=True)
     instagram_user_id = models.CharField(max_length=255, unique=True)
     username = models.CharField(max_length=255)
     full_name = models.CharField(max_length=255, blank=True, null=True)
@@ -27,6 +27,8 @@ class InstagramAccount(models.Model):
     refresh_token = models.TextField(blank=True, null=True)
     profile_picture_url = models.URLField(max_length=500, blank=True, null=True)
     used_for_login = models.BooleanField(default=True)
+    is_active = models.BooleanField(default=True)
+    is_enabled = models.BooleanField(default=True)
     connected_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

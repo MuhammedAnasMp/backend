@@ -41,3 +41,10 @@ def create_custom_token(uid):
     except Exception as e:
         print(f"Error creating custom token: {e}")
         return None
+def delete_firebase_user(uid):
+    try:
+        auth.delete_user(uid)
+        return True
+    except Exception as e:
+        print(f"Error deleting Firebase user: {e}")
+        return False
