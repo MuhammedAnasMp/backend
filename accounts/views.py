@@ -145,6 +145,40 @@ class FirebaseLoginView(APIView):
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+def exchange_short_lived_for_long_lived_token(short_lived_token):
+    from django.conf import settings
+    # Check if it is a Basic Display token (IGAA...)
+    if short_lived_token.startswith("IGAA"):
+        url = "https://graph.instagram.com/access_token"
+        params = {
+            "grant_type": "ig_exchange_token",
+            "client_secret": settings.INSTAGRAM_CLIENT_SECRET,
+            "access_token": short_lived_token
+        }
+        try:
+            r = requests.get(url, params=params)
+            r.raise_for_status()
+            return r.json().get("access_token", short_lived_token)
+        except Exception as e:
+            print(f"Error exchanging personal IG token: {e}")
+            return short_lived_token
+    else:
+        # Standard professional Facebook Graph Exchange
+        url = "https://graph.facebook.com/v25.0/oauth/access_token"
+        params = {
+            "grant_type": "fb_exchange_token",
+            "client_id": settings.INSTAGRAM_CLIENT_ID,
+            "client_secret": settings.INSTAGRAM_CLIENT_SECRET,
+            "fb_exchange_token": short_lived_token
+        }
+        try:
+            r = requests.get(url, params=params)
+            r.raise_for_status()
+            return r.json().get("access_token", short_lived_token)
+        except Exception as e:
+            print(f"Error exchanging professional IG token: {e}")
+            return short_lived_token
+
 class InstagramLoginView(APIView):
     def post(self, request):
         access_token = request.data.get('access_token')
@@ -176,6 +210,9 @@ class InstagramLoginView(APIView):
         if not access_token:
             return Response({'error': 'access_token or code is required'}, status=status.HTTP_400_BAD_REQUEST)
 
+        # Exchange short-lived token for long-lived token (60 days)
+        access_token = exchange_short_lived_for_long_lived_token(access_token)
+
         try:
             # Verify with Instagram using v25.0
             # 'id' is the Instagram-Scoped ID (IGSID/SID)
@@ -192,34 +229,45 @@ class InstagramLoginView(APIView):
                 return Response({'error': 'Invalid Instagram token', 'details': response.json()}, status=status.HTTP_401_UNAUTHORIZED)
             
             data = response.json()
-            ig_sid = data.get('id')        # Scoped ID (PSID/SID)
-            ig_id = data.get('user_id')    # Global ID (starts with 17)
+            ig_sid = data.get('id')        # Scoped ID (PSID/SID) or actual global User ID if Basic Display API
+            ig_id = data.get('user_id')    # Global ID (starts with 17) or None if Basic Display API
             ig_username = data.get('username')
             ig_full_name = data.get('name')
             ig_profile_pic = data.get('profile_picture_url')
             
-            # Use SID as the primary identifier if available, fallback to ig_id for legacy or if SID is missing
-            primary_id = ig_sid or ig_id
-            if not primary_id:
-                return Response({'error': 'No valid ID returned from Instagram'}, status=status.HTTP_400_BAD_REQUEST)
-            
+            # Determine correct IDs
+            # If ig_id is present, then ig_sid is the scoped ID, and ig_id is the user ID.
+            # If ig_id is not present, then ig_sid itself is the global user ID!
+            resolved_scoped_id = None
+            resolved_user_id = None
+
+            if ig_id:
+                resolved_scoped_id = ig_sid
+                resolved_user_id = ig_id
+            else:
+                resolved_user_id = ig_sid
+
             auth_header = request.headers.get('Authorization', 'No Header')
             print(f"[InstagramLogin] Auth Header: {auth_header}")
             print(f"[InstagramLogin] request.user.is_authenticated: {request.user.is_authenticated}")
             
-            # Use update_or_create to strictly enforce uniqueness of instagram_user_id
-            # and update the existing record if found.
+            # Look up existing account using all possible ID permutations to avoid duplicates/login time problems
+            ig_account = None
+            if resolved_user_id:
+                ig_account = InstagramAccount.objects.filter(instagram_user_id=resolved_user_id).first()
+            if not ig_account and resolved_scoped_id:
+                ig_account = InstagramAccount.objects.filter(instagram_scoped_id=resolved_scoped_id).first()
+            if not ig_account and resolved_scoped_id:
+                ig_account = InstagramAccount.objects.filter(instagram_user_id=resolved_scoped_id).first()
+            if not ig_account and resolved_user_id:
+                ig_account = InstagramAccount.objects.filter(instagram_scoped_id=resolved_user_id).first()
+
             if request.user.is_authenticated:
                 # 1. Linking Mode (Logged in)
                 user = request.user
                 print(f"[InstagramLogin] Authenticated Link: User(id={user.id}, email={user.email})")
 
-                # Check if this account already belongs to another active user
-                existing_account = InstagramAccount.objects.filter(instagram_scoped_id=ig_sid).first()
-                if not existing_account and ig_id:
-                    existing_account = InstagramAccount.objects.filter(instagram_user_id=ig_id).first()
-                
-                if existing_account and existing_account.user and existing_account.user != user and existing_account.is_active:
+                if ig_account and ig_account.user and ig_account.user != user and ig_account.is_active:
                     return Response({
                         'error': 'Account already in use',
                         'details': f'The Instagram account @{ig_username} is already linked to another AnyDm user. Please disconnect it from the other account first.'
@@ -230,27 +278,42 @@ class InstagramLoginView(APIView):
                     user.first_name = ig_full_name
                     user.save()
 
-                ig_account, created = InstagramAccount.objects.update_or_create(
-                    instagram_scoped_id=ig_sid,
-                    defaults={
-                        'instagram_user_id': ig_id,
-                        'user': user,
-                        'username': ig_username,
-                        'full_name': ig_full_name,
-                        'access_token': access_token,
-                        'profile_picture_url': ig_profile_pic,
-                        'used_for_login': True,
-                        'is_active': True
-                    }
-                )
+                if ig_account:
+                    # Update without losing the scoped ID
+                    final_scoped_id = ig_account.instagram_scoped_id or resolved_scoped_id
+                    final_user_id = ig_account.instagram_user_id or resolved_user_id
+
+                    # If we only have resolved_user_id and no scoped_id, we keep final_scoped_id as is (e.g. 27078812251731733)
+                    if resolved_scoped_id and resolved_scoped_id != final_user_id:
+                        final_scoped_id = resolved_scoped_id
+
+                    ig_account.instagram_scoped_id = final_scoped_id
+                    ig_account.instagram_user_id = final_user_id
+                    ig_account.user = user
+                    ig_account.username = ig_username
+                    ig_account.full_name = ig_full_name
+                    ig_account.access_token = access_token
+                    ig_account.profile_picture_url = ig_profile_pic
+                    ig_account.used_for_login = True
+                    ig_account.is_active = True
+                    ig_account.save()
+                    created = False
+                else:
+                    ig_account = InstagramAccount.objects.create(
+                        user=user,
+                        instagram_scoped_id=resolved_scoped_id,
+                        instagram_user_id=resolved_user_id,
+                        username=ig_username,
+                        full_name=ig_full_name,
+                        access_token=access_token,
+                        profile_picture_url=ig_profile_pic,
+                        used_for_login=True,
+                        is_active=True
+                    )
+                    created = True
                 print(f"[InstagramLogin] Linked account {ig_username} to User(id={user.id}). Created: {created}")
             else:
                 # 2. Entry Login Mode (Logged out)
-                # Check if this account already exists
-                ig_account = InstagramAccount.objects.filter(instagram_scoped_id=ig_sid).first()
-                if not ig_account and ig_id:
-                    ig_account = InstagramAccount.objects.filter(instagram_user_id=ig_id).first()
-                
                 if ig_account and ig_account.user:
                     # Enforce user-defined login restrictions
                     if not ig_account.used_for_login:
@@ -259,10 +322,16 @@ class InstagramLoginView(APIView):
                             'details': f'Login with @{ig_username} is disabled for this AnyDm account. Please log in with another account or method.'
                         }, status=status.HTTP_403_FORBIDDEN)
                     
-
-
                     user = ig_account.user
-                    # Update info
+                    # Update without losing the scoped ID
+                    final_scoped_id = ig_account.instagram_scoped_id or resolved_scoped_id
+                    final_user_id = ig_account.instagram_user_id or resolved_user_id
+
+                    if resolved_scoped_id and resolved_scoped_id != final_user_id:
+                        final_scoped_id = resolved_scoped_id
+
+                    ig_account.instagram_scoped_id = final_scoped_id
+                    ig_account.instagram_user_id = final_user_id
                     ig_account.username = ig_username
                     ig_account.access_token = access_token
                     ig_account.profile_picture_url = ig_profile_pic
@@ -271,16 +340,8 @@ class InstagramLoginView(APIView):
                     print(f"[InstagramLogin] Logging in User(id={user.id}) via IG account {ig_username}.")
                 else:
                     # Detached or new account: needs a user
-                    if ig_account and not ig_account.user:
-                        print(f"[InstagramLogin] Claiming detached IG account {ig_username}.")
-                        # We still need a user. If this is a detached account, 
-                        # it means the previous owner unlinked it. 
-                        # We create a new user for it or find one?
-                        # For simplicity, let's treat it as a new user registration for this IG.
-                        pass
-                    
                     print(f"[InstagramLogin] Creating/Finding user for IG account {ig_username}.")
-                    django_username = f"ig_{ig_username}_{ig_sid or ig_id}"
+                    django_username = f"ig_{ig_username}_{resolved_user_id or resolved_scoped_id}"
                     user, user_created = User.objects.get_or_create(
                         username=django_username,
                         defaults={'first_name': ig_full_name}
@@ -288,8 +349,14 @@ class InstagramLoginView(APIView):
                     
                     if ig_account:
                         ig_account.user = user
-                        ig_account.instagram_scoped_id = ig_sid
-                        ig_account.instagram_user_id = ig_id
+                        final_scoped_id = ig_account.instagram_scoped_id or resolved_scoped_id
+                        final_user_id = ig_account.instagram_user_id or resolved_user_id
+
+                        if resolved_scoped_id and resolved_scoped_id != final_user_id:
+                            final_scoped_id = resolved_scoped_id
+
+                        ig_account.instagram_scoped_id = final_scoped_id
+                        ig_account.instagram_user_id = final_user_id
                         ig_account.username = ig_username
                         ig_account.full_name = ig_full_name
                         ig_account.access_token = access_token
@@ -300,8 +367,8 @@ class InstagramLoginView(APIView):
                     else:
                         ig_account = InstagramAccount.objects.create(
                             user=user,
-                            instagram_scoped_id=ig_sid,
-                            instagram_user_id=ig_id,
+                            instagram_scoped_id=resolved_scoped_id,
+                            instagram_user_id=resolved_user_id,
                             username=ig_username,
                             full_name=ig_full_name,
                             access_token=access_token,
@@ -309,7 +376,7 @@ class InstagramLoginView(APIView):
                             used_for_login=True,
                             is_active=True
                         )
-                    print(f"[InstagramLogin] Associated User(id={user.id}) with IG account. Created: {not bool(ig_account)}")
+                    print(f"[InstagramLogin] Associated User(id={user.id}) with IG account.")
             
             # Update login methods safely
             stored_methods = user.login_methods if isinstance(user.login_methods, list) else []
@@ -578,10 +645,18 @@ class InstagramStoriesView(APIView):
             return Response({'error': 'Instagram user ID is missing'}, status=status.HTTP_400_BAD_REQUEST)
         
         print(f"[InstagramStoriesView] PRE-CALL CREDENTIALS - user_id: {user_id}, access_token: {active_account.access_token}")
-        print(active_account.instagram_scoped_id)
-        url = f"https://graph.instagram.com/v25.0/{user_id}/stories"
+        
+        is_basic = active_account.access_token.startswith("IGAA")
+        host = "graph.instagram.com" if is_basic else "graph.facebook.com"
+        url = f"https://{host}/v25.0/{user_id}/stories"
+        
+        # Omit thumbnail_url on Basic Display API stories edge to prevent 400 Bad Request
+        fields = "id,media_type,media_url,permalink,caption,username,timestamp"
+        if not is_basic:
+            fields += ",thumbnail_url"
+            
         params = {
-            "fields": "id,media_type,media_url,permalink,caption,username,timestamp",
+            "fields": fields,
             "access_token": active_account.access_token
         }
         
@@ -615,9 +690,18 @@ class InstagramMediaListView(APIView):
             return Response({'error': 'Instagram user ID is missing'}, status=status.HTTP_400_BAD_REQUEST)
         
         print(f"[InstagramMediaListView] PRE-CALL CREDENTIALS - user_id: {user_id}, access_token: {active_account.access_token}")
-        url = f"https://graph.instagram.com/v25.0/{user_id}/media"
+        
+        is_basic = active_account.access_token.startswith("IGAA")
+        host = "graph.instagram.com" if is_basic else "graph.facebook.com"
+        url = f"https://{host}/v25.0/{user_id}/media"
+        
+        # Omit thumbnail_url for Basic Display accounts as it is not supported on this edge
+        fields = "id,caption,media_type,media_url,permalink,timestamp,like_count"
+        if not is_basic:
+            fields += ",thumbnail_url"
+            
         params = {
-            "fields": "id,caption,media_type,media_url,permalink,timestamp,like_count",
+            "fields": fields,
             "access_token": active_account.access_token
         }
         
