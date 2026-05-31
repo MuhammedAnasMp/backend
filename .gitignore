@@ -139,3 +139,7 @@ GitHub.sublime-settings
 !.vscode/extensions.json 
 .history
 
+
+# ignore migrations folder
+backend/products/migrations
+backend/accounts/migrations

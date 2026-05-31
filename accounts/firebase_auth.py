@@ -22,8 +22,14 @@ firebase_creds = {
 }
 
 if not firebase_admin._apps:
-    cred = credentials.Certificate(firebase_creds)
-    firebase_admin.initialize_app(cred)
+    if firebase_creds.get("project_id") and firebase_creds.get("private_key"):
+        try:
+            cred = credentials.Certificate(firebase_creds)
+            firebase_admin.initialize_app(cred)
+        except Exception as e:
+            print(f"Warning: Firebase Admin failed to initialize: {e}")
+    else:
+        print("Warning: Firebase credentials are not fully configured in the environment. Firebase authentication will fallback.")
 
 def verify_firebase_token(id_token):
     try:

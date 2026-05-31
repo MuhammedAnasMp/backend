@@ -1,13 +1,27 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework import status
-from .models import Product
-from .utils import extract_instagram_id
+from rest_framework import status, viewsets
 from rest_framework.permissions import IsAuthenticated
+from .models import Product
+from .serializers import ProductSerializer
+from .utils import extract_instagram_id
+
+class ProductViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for full CRUD operations on Products.
+    Enforces multi-tenant isolation (sellers only manage their own items).
+    """
+    serializer_class = ProductSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        # Only return products belonging to the currently authenticated seller
+        return Product.objects.filter(seller=self.request.user).order_by('-created_at')
+
 
 class ResolveProductView(APIView):
     """
-    Given an Instagram URL, returns the linked product details.
+    Given an Instagram URL, returns the linked active product details.
     """
     def post(self, request):
         url = request.data.get("url")
@@ -19,8 +33,8 @@ class ResolveProductView(APIView):
             return Response({"error": "Invalid Instagram URL"}, status=status.HTTP_400_BAD_REQUEST)
         
         try:
-            # Look up product by its source_id (Instagram shortcode)
-            product = Product.objects.get(source_id=shortcode, is_published=True)
+            # Look up active products by Instagram source_id (shortcode)
+            product = Product.objects.get(source_id=shortcode, status='ACTIVE')
             return Response({
                 "found": True,
                 "product": {
@@ -39,9 +53,10 @@ class ResolveProductView(APIView):
                 "shortcode": shortcode
             }, status=status.HTTP_404_NOT_FOUND)
 
+
 class RegisterProductMappingView(APIView):
     """
-    Registers a new product or converts an existing social source into a product.
+    Registers a new product or converts an existing social source into an active product.
     """
     permission_classes = [IsAuthenticated]
 
@@ -59,7 +74,7 @@ class RegisterProductMappingView(APIView):
         if not shortcode:
             return Response({"error": "Invalid Instagram URL"}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Create or Update Product
+        # Create or Update Product with Status 'ACTIVE' (Published)
         product, created = Product.objects.update_or_create(
             source_id=shortcode,
             defaults={
@@ -69,7 +84,7 @@ class RegisterProductMappingView(APIView):
                 "is_negotiable": is_negotiable,
                 "main_media_url": media_url,
                 "source_type": "REEL",
-                "is_published": True
+                "status": "ACTIVE"
             }
         )
 
