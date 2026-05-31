@@ -20,7 +20,8 @@ class User(AbstractUser):
 
 class InstagramAccount(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, related_name='instagram_accounts', null=True, blank=True)
-    instagram_user_id = models.CharField(max_length=255, unique=True)
+    instagram_scoped_id = models.CharField(max_length=255, unique=True, null=True, blank=True) # The SID/PSID tied to the platform
+    instagram_user_id = models.CharField(max_length=255, blank=True, null=True) # The global IGID (starts with 17)
     username = models.CharField(max_length=255)
     full_name = models.CharField(max_length=255, blank=True, null=True)
     access_token = models.TextField()

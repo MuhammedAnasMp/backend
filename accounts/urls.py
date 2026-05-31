@@ -9,7 +9,9 @@ from .views import (
     InstagramDataDeletionView,
     RemoveInstagramAccountView,
     ToggleInstagramEnabledView,
-    SetActiveInstagramAccountView
+    SetActiveInstagramAccountView,
+    InstagramStoriesView,
+    InstagramMediaListView
 )
 
 urlpatterns = [
@@ -23,4 +25,6 @@ urlpatterns = [
     path('auth/instagram/remove/', RemoveInstagramAccountView.as_view(), name='instagram-remove'),
     path('auth/instagram/toggle-enabled/', ToggleInstagramEnabledView.as_view(), name='instagram-toggle-enabled'),
     path('auth/instagram/set-active/', SetActiveInstagramAccountView.as_view(), name='instagram-set-active'),
+    path('instagram/stories/', InstagramStoriesView.as_view(), name='instagram-stories'),
+    path('instagram/media-list/', InstagramMediaListView.as_view(), name='instagram-media-list'),
 ]

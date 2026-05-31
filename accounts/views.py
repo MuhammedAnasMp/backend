@@ -177,11 +177,13 @@ class InstagramLoginView(APIView):
             return Response({'error': 'access_token or code is required'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            # Verify with Instagram
+            # Verify with Instagram using v25.0
+            # 'id' is the Instagram-Scoped ID (IGSID/SID)
+            # 'user_id' is the global Instagram ID (IGID, starts with 17) - requires instagram_graph_user_id permission
             response = requests.get(
-                "https://graph.instagram.com/me",
+                "https://graph.instagram.com/v25.0/me",
                 params={
-                    'fields': 'id,username,name,account_type,profile_picture_url',
+                    'fields': 'id,user_id,username,name,account_type,profile_picture_url',
                     'access_token': access_token
                 }
             )
@@ -190,10 +192,16 @@ class InstagramLoginView(APIView):
                 return Response({'error': 'Invalid Instagram token', 'details': response.json()}, status=status.HTTP_401_UNAUTHORIZED)
             
             data = response.json()
-            ig_id = data.get('id')
+            ig_sid = data.get('id')        # Scoped ID (PSID/SID)
+            ig_id = data.get('user_id')    # Global ID (starts with 17)
             ig_username = data.get('username')
             ig_full_name = data.get('name')
             ig_profile_pic = data.get('profile_picture_url')
+            
+            # Use SID as the primary identifier if available, fallback to ig_id for legacy or if SID is missing
+            primary_id = ig_sid or ig_id
+            if not primary_id:
+                return Response({'error': 'No valid ID returned from Instagram'}, status=status.HTTP_400_BAD_REQUEST)
             
             auth_header = request.headers.get('Authorization', 'No Header')
             print(f"[InstagramLogin] Auth Header: {auth_header}")
@@ -206,30 +214,26 @@ class InstagramLoginView(APIView):
                 user = request.user
                 print(f"[InstagramLogin] Authenticated Link: User(id={user.id}, email={user.email})")
 
-                # Check if this account already belongs to someone else
-                existing_ig = InstagramAccount.objects.filter(instagram_user_id=ig_id).first()
-                if existing_ig and existing_ig.user != user:
+                # Check if this account already belongs to another active user
+                existing_account = InstagramAccount.objects.filter(instagram_scoped_id=ig_sid).first()
+                if not existing_account and ig_id:
+                    existing_account = InstagramAccount.objects.filter(instagram_user_id=ig_id).first()
+                
+                if existing_account and existing_account.user and existing_account.user != user and existing_account.is_active:
                     return Response({
-                        'error': 'Account already added', 
-                        'details': f'The Instagram account @{ig_username} is already linked to another AnyDm user.'
+                        'error': 'Account already in use',
+                        'details': f'The Instagram account @{ig_username} is already linked to another AnyDm user. Please disconnect it from the other account first.'
                     }, status=status.HTTP_400_BAD_REQUEST)
 
                 # Sync first_name if missing
                 if not user.first_name and ig_full_name:
                     user.first_name = ig_full_name
                     user.save()
-                
-                # Check for ownership conflict
-                existing_account = InstagramAccount.objects.filter(instagram_user_id=ig_id).first()
-                if existing_account and existing_account.user != user and existing_account.is_active:
-                    return Response({
-                        'error': 'Account already in use',
-                        'details': f'Instagram account @{ig_username} is already linked to another AnyDm user. Please disconnect it from the other account first.'
-                    }, status=status.HTTP_400_BAD_REQUEST)
 
                 ig_account, created = InstagramAccount.objects.update_or_create(
-                    instagram_user_id=ig_id,
+                    instagram_scoped_id=ig_sid,
                     defaults={
+                        'instagram_user_id': ig_id,
                         'user': user,
                         'username': ig_username,
                         'full_name': ig_full_name,
@@ -243,7 +247,9 @@ class InstagramLoginView(APIView):
             else:
                 # 2. Entry Login Mode (Logged out)
                 # Check if this account already exists
-                ig_account = InstagramAccount.objects.filter(instagram_user_id=ig_id).first()
+                ig_account = InstagramAccount.objects.filter(instagram_scoped_id=ig_sid).first()
+                if not ig_account and ig_id:
+                    ig_account = InstagramAccount.objects.filter(instagram_user_id=ig_id).first()
                 
                 if ig_account and ig_account.user:
                     # Enforce user-defined login restrictions
@@ -274,7 +280,7 @@ class InstagramLoginView(APIView):
                         pass
                     
                     print(f"[InstagramLogin] Creating/Finding user for IG account {ig_username}.")
-                    django_username = f"ig_{ig_username}_{ig_id}"
+                    django_username = f"ig_{ig_username}_{ig_sid or ig_id}"
                     user, user_created = User.objects.get_or_create(
                         username=django_username,
                         defaults={'first_name': ig_full_name}
@@ -282,6 +288,8 @@ class InstagramLoginView(APIView):
                     
                     if ig_account:
                         ig_account.user = user
+                        ig_account.instagram_scoped_id = ig_sid
+                        ig_account.instagram_user_id = ig_id
                         ig_account.username = ig_username
                         ig_account.full_name = ig_full_name
                         ig_account.access_token = access_token
@@ -292,6 +300,7 @@ class InstagramLoginView(APIView):
                     else:
                         ig_account = InstagramAccount.objects.create(
                             user=user,
+                            instagram_scoped_id=ig_sid,
                             instagram_user_id=ig_id,
                             username=ig_username,
                             full_name=ig_full_name,
@@ -339,7 +348,8 @@ class InstagramLoginView(APIView):
                 'instagram_account': {
                     'id': ig_account.id,
                     'username': ig_account.username,
-                    'instagram_id': ig_account.instagram_user_id,
+                    'instagram_id': ig_account.instagram_scoped_id or ig_account.instagram_user_id,
+                    'instagram_global_id': ig_account.instagram_user_id,
                     'profile_picture_url': ig_account.profile_picture_url,
                     'used_for_login': ig_account.used_for_login,
                     'is_enabled': ig_account.is_enabled
@@ -387,7 +397,8 @@ class GetConnectedInstagramAccountsView(APIView):
             {
                 'id': acc.id, 
                 'username': acc.username, 
-                'instagram_id': acc.instagram_user_id,
+                'instagram_id': acc.instagram_scoped_id or acc.instagram_user_id,
+                'instagram_global_id': acc.instagram_user_id,
                 'profile_picture_url': acc.profile_picture_url,
                 'used_for_login': acc.used_for_login,
                 'is_enabled': acc.is_enabled
@@ -413,6 +424,11 @@ class InstagramDeauthorizeView(APIView):
         ig_id = data.get('user_id')
         if ig_id:
             # Mark the account as not used for login or delete tokens
+            # Try to match by scoped ID first (common in newer apps) then global ID
+            InstagramAccount.objects.filter(instagram_scoped_id=ig_id).update(
+                access_token="",
+                used_for_login=False
+            )
             InstagramAccount.objects.filter(instagram_user_id=ig_id).update(
                 access_token="",
                 used_for_login=False
@@ -543,3 +559,77 @@ class SetActiveInstagramAccountView(APIView):
             }, status=status.HTTP_200_OK)
         except InstagramAccount.DoesNotExist:
             return Response({'error': 'Account not found or access denied.'}, status=status.HTTP_404_NOT_FOUND)
+
+class InstagramStoriesView(APIView):
+    def get(self, request):
+        if not request.user.is_authenticated:
+            return Response({'error': 'Authentication required'}, status=status.HTTP_401_UNAUTHORIZED)
+        
+        user = request.user
+        active_account = user.active_instagram_account
+        if not active_account:
+            return Response({'error': 'No active Instagram account connected'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        if not active_account.access_token:
+            return Response({'error': 'Instagram account access token is missing'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        user_id = active_account.instagram_user_id or active_account.instagram_scoped_id
+        if not user_id:
+            return Response({'error': 'Instagram user ID is missing'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        print(f"[InstagramStoriesView] PRE-CALL CREDENTIALS - user_id: {user_id}, access_token: {active_account.access_token}")
+        print(active_account.instagram_scoped_id)
+        url = f"https://graph.instagram.com/v25.0/{user_id}/stories"
+        params = {
+            "fields": "id,media_type,media_url,permalink,caption,username,timestamp",
+            "access_token": active_account.access_token
+        }
+        
+        try:
+            r = requests.get(url, params=params)
+            r.raise_for_status()
+            return Response(r.json(), status=status.HTTP_200_OK)
+        except requests.exceptions.RequestException as e:
+            print(f"Error fetching Instagram stories: {e}")
+            try:
+                err_data = r.json()
+            except Exception:
+                err_data = str(e)
+            return Response({'error': 'Failed to fetch stories from Instagram', 'details': err_data}, status=status.HTTP_502_BAD_GATEWAY)
+
+class InstagramMediaListView(APIView):
+    def get(self, request):
+        if not request.user.is_authenticated:
+            return Response({'error': 'Authentication required'}, status=status.HTTP_401_UNAUTHORIZED)
+        
+        user = request.user
+        active_account = user.active_instagram_account
+        if not active_account:
+            return Response({'error': 'No active Instagram account connected'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        if not active_account.access_token:
+            return Response({'error': 'Instagram account access token is missing'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        user_id = active_account.instagram_user_id or active_account.instagram_scoped_id
+        if not user_id:
+            return Response({'error': 'Instagram user ID is missing'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        print(f"[InstagramMediaListView] PRE-CALL CREDENTIALS - user_id: {user_id}, access_token: {active_account.access_token}")
+        url = f"https://graph.instagram.com/v25.0/{user_id}/media"
+        params = {
+            "fields": "id,caption,media_type,media_url,permalink,timestamp,like_count",
+            "access_token": active_account.access_token
+        }
+        
+        try:
+            r = requests.get(url, params=params)
+            r.raise_for_status()
+            return Response(r.json(), status=status.HTTP_200_OK)
+        except requests.exceptions.RequestException as e:
+            print(f"Error fetching Instagram media: {e}")
+            try:
+                err_data = r.json()
+            except Exception:
+                err_data = str(e)
+            return Response({'error': 'Failed to fetch media from Instagram', 'details': err_data}, status=status.HTTP_502_BAD_GATEWAY)
+
