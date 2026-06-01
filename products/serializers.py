@@ -1,6 +1,11 @@
 from rest_framework import serializers
 from .models import Product, ProductMedia, Category
 
+class CategorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Category
+        fields = ['id', 'name']
+
 class ProductMediaSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProductMedia
@@ -12,15 +17,15 @@ class ProductSerializer(serializers.ModelSerializer):
     
     # Map frontend parameters to backend model fields
     negotiable = serializers.BooleanField(source='is_negotiable', required=False, default=True)
-    media_url = serializers.URLField(source='main_media_url', required=False, allow_null=True, allow_blank=True)
+    media_url = serializers.URLField(source='main_media_url', required=False, allow_null=True, allow_blank=True, max_length=2000)
     
     class Meta:
         model = Product
         fields = [
-            'id', 'title', 'description', 'price', 'currency', 'stock',
+            'id', 'title', 'description', 'price', 'original_price', 'currency', 'stock',
             'negotiable', 'category', 'location', 'media_url', 'source_type',
             'source_id', 'instagram_permalink', 'status', 'created_at',
-            'updated_at', 'gallery', 'cloudinary_metadata'
+            'updated_at', 'gallery', 'cloudinary_metadata', 'metadata'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at', 'source_type', 'source_id', 'instagram_permalink']
 
@@ -52,15 +57,20 @@ class ProductSerializer(serializers.ModelSerializer):
         category_name = validated_data.pop('category', None)
         gallery_data = validated_data.pop('gallery', [])
         
-        # Dynamic Category object resolution
-        if category_name:
-            category_obj, _ = Category.objects.get_or_create(name=category_name)
-            validated_data['category'] = category_obj
-
         # Auto assign current seller/user context
         request = self.context.get('request')
+        
+        # Dynamic Category object resolution
+        if category_name:
+            user = request.user if request and request.user.is_authenticated else None
+            category_obj, _ = Category.objects.get_or_create(name=category_name, user=user)
+            validated_data['category'] = category_obj
+
         if request and request.user:
             validated_data['seller'] = request.user
+            active_ig = getattr(request.user, 'active_instagram_account', None) or request.user.instagram_accounts.filter(is_active=True).first()
+            if active_ig:
+                validated_data['instagram_account'] = active_ig
 
         # Capture Instagram source parameters if creating via import
         if request and request.data:
@@ -91,7 +101,9 @@ class ProductSerializer(serializers.ModelSerializer):
 
         if category_name is not None:
             if category_name:
-                category_obj, _ = Category.objects.get_or_create(name=category_name)
+                request = self.context.get('request')
+                user = request.user if request and request.user.is_authenticated else None
+                category_obj, _ = Category.objects.get_or_create(name=category_name, user=user)
                 instance.category = category_obj
             else:
                 instance.category = None

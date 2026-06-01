@@ -11,7 +11,8 @@ from .views import (
     ToggleInstagramEnabledView,
     SetActiveInstagramAccountView,
     InstagramStoriesView,
-    InstagramMediaListView
+    InstagramMediaListView,
+    InstagramMediaProxyView
 )
 
 urlpatterns = [
@@ -27,4 +28,6 @@ urlpatterns = [
     path('auth/instagram/set-active/', SetActiveInstagramAccountView.as_view(), name='instagram-set-active'),
     path('instagram/stories/', InstagramStoriesView.as_view(), name='instagram-stories'),
     path('instagram/media-list/', InstagramMediaListView.as_view(), name='instagram-media-list'),
+    path('instagram/proxy-media/', InstagramMediaProxyView.as_view(), name='instagram-media-proxy'),
 ]
+

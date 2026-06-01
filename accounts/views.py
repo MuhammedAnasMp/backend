@@ -650,10 +650,7 @@ class InstagramStoriesView(APIView):
         host = "graph.instagram.com" if is_basic else "graph.facebook.com"
         url = f"https://{host}/v25.0/{user_id}/stories"
         
-        # Omit thumbnail_url on Basic Display API stories edge to prevent 400 Bad Request
-        fields = "id,media_type,media_url,permalink,caption,username,timestamp"
-        if not is_basic:
-            fields += ",thumbnail_url"
+        fields = "id,media_type,media_url,permalink,caption,username,timestamp,thumbnail_url"
             
         params = {
             "fields": fields,
@@ -695,15 +692,16 @@ class InstagramMediaListView(APIView):
         host = "graph.instagram.com" if is_basic else "graph.facebook.com"
         url = f"https://{host}/v25.0/{user_id}/media"
         
-        # Omit thumbnail_url for Basic Display accounts as it is not supported on this edge
-        fields = "id,caption,media_type,media_url,permalink,timestamp,like_count"
-        if not is_basic:
-            fields += ",thumbnail_url"
+        fields = "id,caption,media_type,media_url,permalink,timestamp,like_count,thumbnail_url,children{id,media_type,media_url,permalink,thumbnail_url}"
             
         params = {
             "fields": fields,
             "access_token": active_account.access_token
         }
+        
+        after_cursor = request.query_params.get("after")
+        if after_cursor:
+            params["after"] = after_cursor
         
         try:
             r = requests.get(url, params=params)
@@ -716,4 +714,29 @@ class InstagramMediaListView(APIView):
             except Exception:
                 err_data = str(e)
             return Response({'error': 'Failed to fetch media from Instagram', 'details': err_data}, status=status.HTTP_502_BAD_GATEWAY)
+
+
+class InstagramMediaProxyView(APIView):
+    def get(self, request):
+        from django.http import HttpResponse
+        url = request.GET.get('url')
+        if not url:
+            return Response({'error': 'url parameter is required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            # For security, restrict proxying to known Instagram and Facebook CDN domains
+            if not any(domain in url for domain in ['instagram.com', 'cdninstagram.com', 'facebook.com', 'fbcdn.net']):
+                return Response({'error': 'Invalid domain'}, status=status.HTTP_400_BAD_REQUEST)
+                
+            r = requests.get(url, stream=True, timeout=20)
+            r.raise_for_status()
+            
+            content_type = r.headers.get('content-type', 'image/jpeg')
+            response = HttpResponse(r.content, content_type=content_type)
+            response["Access-Control-Allow-Origin"] = "*"
+            return response
+        except Exception as e:
+            print(f"[InstagramMediaProxyView] Error proxying media URL {url}: {e}")
+            return Response({'error': f'Failed to proxy media: {str(e)}'}, status=status.HTTP_502_BAD_GATEWAY)
+
 

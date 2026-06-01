@@ -3,7 +3,11 @@ from django.conf import settings
 
 
 class Category(models.Model):
-    name = models.CharField(max_length=100, unique=True)
+    name = models.CharField(max_length=100)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="categories", null=True, blank=True)
+
+    class Meta:
+        unique_together = ('name', 'user')
 
     def __str__(self):
         return self.name
@@ -29,6 +33,14 @@ class Product(models.Model):
         related_name="products"
     )
 
+    instagram_account = models.ForeignKey(
+        'accounts.InstagramAccount',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="products"
+    )
+
     title = models.CharField(max_length=255, blank=True, null=True)
     description = models.TextField(blank=True, null=True)
 
@@ -37,6 +49,14 @@ class Product(models.Model):
         decimal_places=2,
         blank=True,
         null=True
+    )
+
+    original_price = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        blank=True,
+        null=True,
+        help_text="Original price before any discounts or offers."
     )
 
     currency = models.CharField(
@@ -62,7 +82,7 @@ class Product(models.Model):
     )
 
     main_media_url = models.URLField(
-        max_length=500,
+        max_length=2000,
         blank=True,
         null=True
     )
@@ -96,6 +116,13 @@ class Product(models.Model):
         help_text="Metadata stored when uploading to Cloudinary"
     )
 
+    metadata = models.JSONField(
+        blank=True,
+        null=True,
+        default=dict,
+        help_text="Dynamic key-value specifications for the product."
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -123,10 +150,10 @@ class ProductMedia(models.Model):
         related_name="gallery"
     )
 
-    media_url = models.URLField(max_length=500)
+    media_url = models.URLField(max_length=2000)
 
     thumbnail_url = models.URLField(
-        max_length=500,
+        max_length=2000,
         blank=True,
         null=True
     )

@@ -1,8 +1,10 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import ProductViewSet, ResolveProductView, RegisterProductMappingView
+from .views import ProductViewSet, ResolveProductView, RegisterProductMappingView, CategoryViewSet
 
 router = DefaultRouter()
+# Map categories endpoint
+router.register(r'categories', CategoryViewSet, basename='category')
 # Map full CRUD operations to the root of this sub-path /api/products/
 router.register(r'', ProductViewSet, basename='product')
 

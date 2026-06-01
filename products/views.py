@@ -2,9 +2,29 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, viewsets
 from rest_framework.permissions import IsAuthenticated
-from .models import Product
-from .serializers import ProductSerializer
+from rest_framework.pagination import PageNumberPagination
+from .models import Product, Category
+from .serializers import ProductSerializer, CategorySerializer
 from .utils import extract_instagram_id
+
+class CategoryViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for managing user-specific Categories.
+    """
+    serializer_class = CategorySerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = None
+
+    def get_queryset(self):
+        return Category.objects.filter(user=self.request.user)
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
+class StandardResultsSetPagination(PageNumberPagination):
+    page_size = 10
+    page_size_query_param = 'page_size'
+    max_page_size = 100
 
 class ProductViewSet(viewsets.ModelViewSet):
     """
@@ -13,10 +33,29 @@ class ProductViewSet(viewsets.ModelViewSet):
     """
     serializer_class = ProductSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = StandardResultsSetPagination
 
     def get_queryset(self):
         # Only return products belonging to the currently authenticated seller
-        return Product.objects.filter(seller=self.request.user).order_by('-created_at')
+        queryset = Product.objects.filter(seller=self.request.user)
+        
+        # Isolate products by the user's active Instagram account
+        active_ig = getattr(self.request.user, 'active_instagram_account', None)
+        
+        # Fallback to the first connected account if none is explicitly set
+        if not active_ig:
+            active_ig = self.request.user.instagram_accounts.filter(is_active=True).first()
+
+        if active_ig:
+            queryset = queryset.filter(instagram_account=active_ig)
+        else:
+            queryset = queryset.filter(instagram_account__isnull=True)
+        
+        search_query = self.request.query_params.get('search', None)
+        if search_query:
+            queryset = queryset.filter(title__icontains=search_query)
+            
+        return queryset.order_by('-created_at')
 
 
 class ResolveProductView(APIView):
@@ -79,6 +118,7 @@ class RegisterProductMappingView(APIView):
             source_id=shortcode,
             defaults={
                 "seller": request.user,
+                "instagram_account": getattr(request.user, 'active_instagram_account', None) or request.user.instagram_accounts.filter(is_active=True).first(),
                 "title": title,
                 "price": price,
                 "is_negotiable": is_negotiable,
