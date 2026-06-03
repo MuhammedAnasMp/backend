@@ -18,7 +18,7 @@ class User(AbstractUser):
     def __str__(self):
         return f"User: {self.username}"
 
-class InstagramAccount(models.Model):
+class InstagramAccount(models.Model): # sellers
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, related_name='instagram_accounts', null=True, blank=True)
     instagram_scoped_id = models.CharField(max_length=255, unique=True, null=True, blank=True) # The SID/PSID tied to the platform
     instagram_user_id = models.CharField(max_length=255, blank=True, null=True) # The global IGID (starts with 17)
@@ -35,3 +35,6 @@ class InstagramAccount(models.Model):
 
     def __str__(self):
         return f"{self.username} ({self.instagram_user_id})"
+
+
+

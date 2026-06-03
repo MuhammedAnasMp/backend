@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Product, ProductMedia
+from .models import Product, ProductMedia, Category
 
 class ProductMediaInline(admin.StackedInline):
     model = ProductMedia
@@ -22,5 +22,10 @@ class ProductAdmin(admin.ModelAdmin):
     inlines = [ProductMediaInline]
     readonly_fields = ('created_at', 'updated_at')
 
+class CategoryAdmin(admin.ModelAdmin):
+    list_display = ('name', 'user')
+    search_fields = ('name',)
+
 admin.site.register(Product, ProductAdmin)
 admin.site.register(ProductMedia)
+admin.site.register(Category, CategoryAdmin)

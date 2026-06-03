@@ -1,3 +1,5 @@
+# Negotiation and Purchase Flow
+
 1. 💬 Customer starts DM
 User asks about an item
 System stores:
@@ -63,3 +65,51 @@ auto split → supplier gets paid
 you take commission
 
 
+
+
+
+
+User asks about product in DM
+↓
+System detects product intent (name / image / keyword / hashtag)
+↓
+Bot replies in chat:
+
+“Here is the product you asked about 👇”
+
+🛍️ Product Card
+
+Image
+Name
+Price
+Short details
+
+↓
+Buttons appear:
+
+[ View Details ]
+[ Ask Seller ]
+[ 🛒 Buy Now ]
+
+↓
+If user clicks “Buy Now”:
+
+Show confirmation screen:
+
+🛒 Confirm Purchase
+
+Product name
+Final price
+Delivery info
+
+↓
+Button:
+
+[ 💳 Pay Now ]
+
+↓
+Payment link generated
+↓
+User completes payment
+↓
+Order confirmed 👍
