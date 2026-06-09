@@ -7,10 +7,13 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from .firebase_auth import verify_firebase_token, delete_firebase_user
-from .models import InstagramAccount
+from .models import InstagramAccount, WebsiteSettings
+from apps.products.models import Product
 from django.contrib.auth import get_user_model
 from django.conf import settings
+from django.utils import timezone
 User = get_user_model()
 
 def parse_signed_request(signed_request):
@@ -106,7 +109,9 @@ class FirebaseLoginView(APIView):
     
             if set(stored_methods) != set(merged_methods):
                 user.login_methods = merged_methods
-                user.save()
+
+            user.last_login = timezone.now()
+            user.save()
     
             # Load Instagram accounts
             instagram_accounts = InstagramAccount.objects.filter(user=user)
@@ -308,7 +313,8 @@ class InstagramLoginView(APIView):
                         access_token=access_token,
                         profile_picture_url=ig_profile_pic,
                         used_for_login=True,
-                        is_active=True
+                        is_active=True,
+                        
                     )
                     created = True
                 print(f"[InstagramLogin] Linked account {ig_username} to User(id={user.id}). Created: {created}")
@@ -391,6 +397,7 @@ class InstagramLoginView(APIView):
             if not user.firebase_uid:
                 user.firebase_uid = str(user.id)
             
+            user.last_login = timezone.now()
             user.save()
             
             # Generate JWT tokens
@@ -738,5 +745,222 @@ class InstagramMediaProxyView(APIView):
         except Exception as e:
             print(f"[InstagramMediaProxyView] Error proxying media URL {url}: {e}")
             return Response({'error': f'Failed to proxy media: {str(e)}'}, status=status.HTTP_502_BAD_GATEWAY)
+
+
+class WebsiteSettingsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        active_account = user.active_instagram_account
+        if not active_account:
+            # Fallback to first active Instagram account if context is missing
+            active_account = user.instagram_accounts.filter(is_active=True).first()
+            if not active_account:
+                return Response({'error': 'No active Instagram account connected.'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Get or create website settings for this active account
+        settings_obj, created = WebsiteSettings.objects.get_or_create(
+            instagram_account=active_account,
+            defaults={
+                'store_name': active_account.full_name or active_account.username,
+                'store_logo': active_account.profile_picture_url or '',
+            }
+        )
+
+        return Response({
+            'store_name': settings_obj.store_name,
+            'store_logo': settings_obj.store_logo,
+            'show_related_products': settings_obj.show_related_products,
+            'enable_instagram_button': settings_obj.enable_instagram_button,
+            'enable_whatsapp_button': settings_obj.enable_whatsapp_button,
+            'template_id': settings_obj.template_id,
+            'theme_id': settings_obj.theme_id,
+            'custom_colors': settings_obj.custom_colors,
+            'custom_fonts': settings_obj.custom_fonts,
+            'custom_settings': settings_obj.custom_settings,
+        }, status=status.HTTP_200_OK)
+
+    def put(self, request):
+        user = request.user
+        active_account = user.active_instagram_account
+        if not active_account:
+            active_account = user.instagram_accounts.filter(is_active=True).first()
+            if not active_account:
+                return Response({'error': 'No active Instagram account connected.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        settings_obj, created = WebsiteSettings.objects.get_or_create(
+            instagram_account=active_account,
+            defaults={
+                'store_name': active_account.full_name or active_account.username,
+                'store_logo': active_account.profile_picture_url or '',
+            }
+        )
+
+        # Update settings fields
+        settings_obj.store_name = request.data.get('store_name', settings_obj.store_name)
+        settings_obj.store_logo = request.data.get('store_logo', settings_obj.store_logo)
+        settings_obj.show_related_products = request.data.get('show_related_products', settings_obj.show_related_products)
+        settings_obj.enable_instagram_button = request.data.get('enable_instagram_button', settings_obj.enable_instagram_button)
+        settings_obj.enable_whatsapp_button = request.data.get('enable_whatsapp_button', settings_obj.enable_whatsapp_button)
+        settings_obj.template_id = request.data.get('template_id', settings_obj.template_id)
+        settings_obj.theme_id = request.data.get('theme_id', settings_obj.theme_id)
+        settings_obj.custom_colors = request.data.get('custom_colors', settings_obj.custom_colors)
+        settings_obj.custom_fonts = request.data.get('custom_fonts', settings_obj.custom_fonts)
+        settings_obj.custom_settings = request.data.get('custom_settings', settings_obj.custom_settings)
+        settings_obj.save()
+
+        return Response({'message': 'Website settings updated successfully'}, status=status.HTTP_200_OK)
+
+
+class PublicStorefrontView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request, username):
+        try:
+            # Find the active Instagram account by username
+            account = InstagramAccount.objects.get(username__iexact=username, is_active=True)
+        except InstagramAccount.DoesNotExist:
+            return Response({'error': 'Supplier not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Get or create website settings
+        settings_obj, _ = WebsiteSettings.objects.get_or_create(
+            instagram_account=account,
+            defaults={
+                'store_name': account.full_name or account.username,
+                'store_logo': account.profile_picture_url or '',
+            }
+        )
+
+        # Get active products for this supplier
+        products = Product.objects.filter(instagram_account=account, status='ACTIVE').order_by('-created_at')
+        products_data = []
+        for p in products:
+            products_data.append({
+                'id': p.id,
+                'title': p.title or 'Untitled Product',
+                'description': p.description or '',
+                'price': str(p.price) if p.price else None,
+                'original_price': str(p.original_price) if p.original_price else None,
+                'currency': p.currency,
+                'main_media_url': p.main_media_url,
+                'instagram_permalink': p.instagram_permalink,
+                'stock': p.stock,
+                'is_negotiable': p.is_negotiable,
+            })
+
+        return Response({
+            'supplier': {
+                'username': account.username,
+                'full_name': account.full_name,
+                'profile_picture_url': account.profile_picture_url,
+            },
+            'settings': {
+                'store_name': settings_obj.store_name,
+                'store_logo': settings_obj.store_logo,
+                'show_related_products': settings_obj.show_related_products,
+                'enable_instagram_button': settings_obj.enable_instagram_button,
+                'enable_whatsapp_button': settings_obj.enable_whatsapp_button,
+                'template_id': settings_obj.template_id,
+                'theme_id': settings_obj.theme_id,
+                'custom_colors': settings_obj.custom_colors,
+                'custom_fonts': settings_obj.custom_fonts,
+                'custom_settings': settings_obj.custom_settings,
+            },
+            'products': products_data
+        }, status=status.HTTP_200_OK)
+
+
+class PublicProductDetailView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request, username, product_id):
+        try:
+            account = InstagramAccount.objects.get(username__iexact=username, is_active=True)
+        except InstagramAccount.DoesNotExist:
+            return Response({'error': 'Supplier not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            product = Product.objects.get(id=product_id, instagram_account=account, status='ACTIVE')
+        except Product.DoesNotExist:
+            return Response({'error': 'Product not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        settings_obj, _ = WebsiteSettings.objects.get_or_create(
+            instagram_account=account,
+            defaults={
+                'store_name': account.full_name or account.username,
+                'store_logo': account.profile_picture_url or '',
+            }
+        )
+
+        # Fetch gallery media items
+        gallery_data = []
+        for g in product.gallery.all().order_by('order'):
+            gallery_data.append({
+                'id': g.id,
+                'media_url': g.media_url,
+                'thumbnail_url': g.thumbnail_url,
+                'media_type': g.media_type,
+                'order': g.order,
+            })
+
+        # Fetch related products if enabled
+        related_data = []
+        if settings_obj.show_related_products:
+            related_products = Product.objects.filter(
+                instagram_account=account, 
+                status='ACTIVE'
+            ).exclude(id=product.id).order_by('-created_at')[:4]
+            
+            for p in related_products:
+                related_data.append({
+                    'id': p.id,
+                    'title': p.title or 'Untitled Product',
+                    'price': str(p.price) if p.price else None,
+                    'currency': p.currency,
+                    'main_media_url': p.main_media_url,
+                })
+
+        # Parse metadata
+        product_metadata = product.metadata if isinstance(product.metadata, dict) else {}
+        variants_string = product_metadata.get('variants', '')
+        variants = [v.strip() for v in variants_string.split(',') if v.strip()] if variants_string else []
+
+        return Response({
+            'product': {
+                'id': product.id,
+                'title': product.title or 'Untitled Product',
+                'description': product.description or '',
+                'price': str(product.price) if product.price else None,
+                'original_price': str(product.original_price) if product.original_price else None,
+                'currency': product.currency,
+                'main_media_url': product.main_media_url,
+                'instagram_permalink': product.instagram_permalink,
+                'stock': product.stock,
+                'is_negotiable': product.is_negotiable,
+                'gallery': gallery_data,
+                'variants': variants,
+                'category': product.category.name if product.category else None,
+            },
+            'supplier': {
+                'username': account.username,
+                'full_name': account.full_name,
+                'profile_picture_url': account.profile_picture_url,
+            },
+            'settings': {
+                'store_name': settings_obj.store_name,
+                'store_logo': settings_obj.store_logo,
+                'show_related_products': settings_obj.show_related_products,
+                'enable_instagram_button': settings_obj.enable_instagram_button,
+                'enable_whatsapp_button': settings_obj.enable_whatsapp_button,
+                'template_id': settings_obj.template_id,
+                'theme_id': settings_obj.theme_id,
+                'custom_colors': settings_obj.custom_colors,
+                'custom_fonts': settings_obj.custom_fonts,
+                'custom_settings': settings_obj.custom_settings,
+            },
+            'related_products': related_data
+        }, status=status.HTTP_200_OK)
+
 
 

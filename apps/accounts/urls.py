@@ -12,7 +12,10 @@ from .views import (
     SetActiveInstagramAccountView,
     InstagramStoriesView,
     InstagramMediaListView,
-    InstagramMediaProxyView
+    InstagramMediaProxyView,
+    WebsiteSettingsView,
+    PublicStorefrontView,
+    PublicProductDetailView
 )
 
 urlpatterns = [
@@ -29,5 +32,9 @@ urlpatterns = [
     path('instagram/stories/', InstagramStoriesView.as_view(), name='instagram-stories'),
     path('instagram/media-list/', InstagramMediaListView.as_view(), name='instagram-media-list'),
     path('instagram/proxy-media/', InstagramMediaProxyView.as_view(), name='instagram-media-proxy'),
+    path('website-settings/', WebsiteSettingsView.as_view(), name='website-settings'),
+    path('public/store/<str:username>/', PublicStorefrontView.as_view(), name='public-storefront'),
+    path('public/store/<str:username>/product/<int:product_id>/', PublicProductDetailView.as_view(), name='public-product-detail'),
 ]
+
 

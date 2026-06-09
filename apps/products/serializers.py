@@ -77,8 +77,13 @@ class ProductSerializer(serializers.ModelSerializer):
             source = request.data.get('source')
             if source == 'instagram':
                 validated_data['source_type'] = 'REEL'
-                validated_data['source_id'] = request.data.get('source_id') or request.data.get('media_id')
-                validated_data['instagram_permalink'] = request.data.get('instagram_permalink')
+                permalink = request.data.get('instagram_permalink')
+                shortcode = None
+                if permalink:
+                    from .utils import extract_instagram_id
+                    shortcode = extract_instagram_id(permalink)
+                validated_data['source_id'] = shortcode or request.data.get('source_id') or request.data.get('media_id')
+                validated_data['instagram_permalink'] = permalink
 
         product = Product.objects.create(**validated_data)
 
@@ -107,6 +112,20 @@ class ProductSerializer(serializers.ModelSerializer):
                 instance.category = category_obj
             else:
                 instance.category = None
+
+        # Capture Instagram source parameters if updating via import/edit
+        request = self.context.get('request')
+        if request and request.data:
+            source = request.data.get('source')
+            if source == 'instagram':
+                instance.source_type = 'REEL'
+                permalink = request.data.get('instagram_permalink') or instance.instagram_permalink
+                shortcode = None
+                if permalink:
+                    from .utils import extract_instagram_id
+                    shortcode = extract_instagram_id(permalink)
+                instance.source_id = shortcode or request.data.get('source_id') or request.data.get('media_id') or instance.source_id
+                instance.instagram_permalink = permalink
 
         # Update core fields
         for attr, value in validated_data.items():

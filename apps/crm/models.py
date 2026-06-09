@@ -3,6 +3,14 @@ from django.conf import settings
 
 
 
+
+
+
+
+
+
+
+
 class Customer(models.Model):
     owner = models.ForeignKey(
         'accounts.InstagramAccount',
@@ -93,9 +101,6 @@ class CustomerInteraction(models.Model):
         return f"{self.customer} - {self.event_type}"
 
 
-
-
-
 class Enquiry(models.Model):
     owner = models.ForeignKey(
         'accounts.InstagramAccount',
@@ -160,11 +165,6 @@ class Enquiry(models.Model):
 
     def __str__(self):
         return f"{self.customer} - {self.status}"
-
-
-
-
-
 
 
 class EnquiryProduct(models.Model):
