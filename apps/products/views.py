@@ -63,6 +63,7 @@ class ResolveProductView(APIView):
     Given an Instagram URL, returns the linked active product details.
     """
     def post(self, request):
+        print("this isdf")
         url = request.data.get("url")
         if not url:
             return Response({"error": "URL is required"}, status=status.HTTP_400_BAD_REQUEST)

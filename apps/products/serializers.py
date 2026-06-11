@@ -85,6 +85,12 @@ class ProductSerializer(serializers.ModelSerializer):
                 validated_data['source_id'] = shortcode or request.data.get('source_id') or request.data.get('media_id')
                 validated_data['instagram_permalink'] = permalink
 
+        seller = validated_data.get('seller')
+        source_id = validated_data.get('source_id')
+        if seller and source_id:
+            if Product.objects.filter(seller=seller, source_id=source_id).exists():
+                raise serializers.ValidationError({"source_id": "A product with this instagram post already exists."})
+
         product = Product.objects.create(**validated_data)
 
         # Build gallery items if provided

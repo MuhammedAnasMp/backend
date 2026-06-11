@@ -31,6 +31,7 @@ class Customer(models.Model):
 
     # 👇 Added fields
     is_following_business = models.BooleanField(null=True, blank=True)
+    is_business_follow_user = models.BooleanField(null=True, blank=True)
     followed_at = models.DateTimeField(null=True, blank=True)
 
     last_interaction_at = models.DateTimeField(null=True, blank=True)
