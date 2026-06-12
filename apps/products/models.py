@@ -98,6 +98,11 @@ class Product(models.Model):
         blank=True,
         null=True
     )
+    media_id = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True
+    )
 
     instagram_permalink = models.URLField(
         blank=True,

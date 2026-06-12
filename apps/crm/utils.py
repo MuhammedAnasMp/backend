@@ -81,7 +81,7 @@ def sync_customer_profile(customer, force=False):
             customer.profile_pic = data["profile_pic"]
             update_fields.append("profile_pic")
 
-        # Follow relationship
+        # Follow relationship (Business follows user)
         if "is_user_follow_business" in data:
             customer.is_following_business = data["is_user_follow_business"]
             update_fields.append("is_following_business")
@@ -93,9 +93,10 @@ def sync_customer_profile(customer, force=False):
                 customer.followed_at = timezone.now()
                 update_fields.append("followed_at")
                 
+        # Corrected field mapping to match customer.is_business_follow_user in models.py
         if "is_business_follow_user" in data:
-            customer.is_followed_by_business = data["is_business_follow_user"]
-            update_fields.append("is_followed_by_business")
+            customer.is_business_follow_user = data["is_business_follow_user"]
+            update_fields.append("is_business_follow_user")
 
         if update_fields:
             customer.save(update_fields=list(set(update_fields)))

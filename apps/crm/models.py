@@ -49,6 +49,7 @@ class Customer(models.Model):
         return self.username or self.full_name or self.instagram_scoped_id
 
 class CustomerInteraction(models.Model):
+
     customer = models.ForeignKey(
         'Customer',
         on_delete=models.CASCADE,
@@ -73,6 +74,37 @@ class CustomerInteraction(models.Model):
             ('SYSTEM', 'System Event'),
         ]
     )
+    message_type = models.CharField(
+    max_length=30,
+    choices=[
+        ('TEXT', 'Text'),
+        ('IMAGE', 'Image'),
+        ('VIDEO', 'Video'),
+        ('AUDIO', 'Audio'),
+        ('FILE', 'File'),
+          ('QUICK_REPLY', 'Quick Reply'),
+            ('BUTTON_TEMPLATE', 'Button Template'),
+            ('GENERIC_TEMPLATE', 'Generic Template'),
+        ('REEL', 'Instagram Reel'),
+        ('POST', 'Instagram Post'),
+        ('STORY', 'Instagram Story'),
+        ('CAROUSEL', 'Instagram Carousel'),
+    ],
+    blank=True,
+    null=True,
+    )
+
+    message_source = models.CharField(
+    max_length=20,
+    choices=[
+        ('WEBIU', 'Web UI'),
+        ('AI', 'AI Assistant'),
+        ('AUTOMATION', 'Workflow Automation'),
+        ('IGSYSTEM', 'IG System'),
+    ],
+    default='IGSYSTEM'
+)
+    
 
     # 👇 Added direction (VERY important for CRM)
     direction = models.CharField(
@@ -84,10 +116,17 @@ class CustomerInteraction(models.Model):
         default='INBOUND'
     )
 
+    render_payload = models.JSONField(
+        null=True,
+        blank=True
+    )
+
+
     message_text = models.TextField(blank=True, null=True)
     media_url = models.URLField(blank=True, null=True)
 
     instagram_event_id = models.CharField(max_length=255, blank=True, null=True)
+    media_id = models.CharField(max_length=255, blank=True, null=True)
 
     metadata = models.JSONField(blank=True, null=True)
 

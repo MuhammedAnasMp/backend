@@ -1,3 +1,4 @@
+from django.utils import module_loading
 import json
 import hashlib
 import hmac
@@ -16,12 +17,11 @@ from django.db.models import Q
 from django.db import connection, transaction, IntegrityError
 from django.core.cache import cache
 
-
-
 from apps.accounts.models import InstagramAccount
 from apps.products.models import Product
 from .models import CustomerInteraction, Customer, Enquiry, EnquiryProduct
 from .tasks import sync_customer_profile_task
+
 # Safe import and compilation stub definition to avoid NameErrors
 try:
     from .tasks import process_enquiry_background_task
@@ -33,41 +33,11 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-STOP_WORDS = {
-    "the", "this", "that", "with", "from", "have", "what", "your", "here", 
-    "there", "is", "are", "and", "but", "for", "you", "not", "can", "how"
-}
-
-
-def stem_word(word):
-    """
-    Applies basic suffix stemming to increase standard keyword hit rates.
-    """
-    if word.endswith("ing") and len(word) > 5:
-        return word[:-3]
-    if word.endswith("ed") and len(word) > 4:
-        return word[:-2]
-    if word.endswith("es") and len(word) > 4:
-        return word[:-2]
-    if word.endswith("s") and len(word) > 3 and not word.endswith("ss"):
-        return word[:-1]
-    return word
-
-
-def extract_keywords(text):
-    """
-    Strips special characters, discards generic stop-words, and stems the remainder.
-    """
-    if not text:
-        return []
-    cleaned = re.sub(r'[^\w\s]', '', text.lower())
-    tokens = [w for w in cleaned.split() if w not in STOP_WORDS and len(w) > 2]
-    return [stem_word(token) for token in tokens]
-
 
 def extract_media_id_safely(event_type, metadata):
     """
-    Defensively extracts Instagram item/media IDs across various payload structures.
+    Defensively extracts Instagram item/media IDs across various payload structures,
+    including comments, stories, and shared reels/posts in direct messages.
     """
     try:
         if event_type == "COMMENT":
@@ -78,7 +48,10 @@ def extract_media_id_safely(event_type, metadata):
 
         attachments = metadata.get("attachments", [])
         for attach in attachments:
-            payload = attach.get("payload", {})
+            if "id" in attach:
+                return attach["id"]
+
+            payload = attach.get("payload", {}) or {}
             
             if "reel_video_id" in payload:
                 return payload["reel_video_id"]
@@ -95,82 +68,9 @@ def extract_media_id_safely(event_type, metadata):
                 if asset_ids:
                     return asset_ids[0]
 
-        # Log warning on unknown attachments with low-frequency sampling to prevent spam
-        if attachments and (timezone.now().second % 10 == 0):
-            logger.warning(f"Inbound DM contains attachments but no media ID was parsed. Payload: {attachments[:2]}")
-
     except Exception as e:
         logger.error(f"Error parsing fallback media ID context: {e}", exc_info=True)
     return None
-
-
-def query_active_products(seller_user, words):
-    """
-    Performs optimized candidate matching using PostgreSQL Full-Text Search
-    with strict boolean and fallback OR rank evaluation.
-    """
-    if not words:
-        return []
-
-    if connection.vendor == 'postgresql':
-        try:
-            from django.contrib.postgres.search import SearchVector, SearchQuery, SearchRank
-            
-            # Weighted vectors for scoring
-            vector = SearchVector('title', weight='A') + SearchVector('description', weight='B')
-            
-            # Combine queries with precise logical AND combinators
-            query_and = SearchQuery(words[0])
-            for word in words[1:]:
-                query_and &= SearchQuery(word)
-                
-            qs = Product.objects.annotate(
-                rank=SearchRank(vector, query_and)
-            ).filter(
-                seller=seller_user,
-                status="ACTIVE",
-                rank__gte=0.1
-            ).order_by('-rank')[:10]
-            
-            if qs.exists():
-                return [(p, p.rank) for p in qs]
-            
-            # Conjunction returned zero matches; evaluate less restrictive OR conditions
-            query_or = SearchQuery(words[0])
-            for word in words[1:]:
-                query_or |= SearchQuery(word)
-                
-            qs_or = Product.objects.annotate(
-                rank=SearchRank(vector, query_or)
-            ).filter(
-                seller=seller_user,
-                status="ACTIVE",
-                rank__gte=0.1
-            ).order_by('-rank')[:10]
-            return [(p, p.rank) for p in qs_or]
-            
-        except Exception as e:
-            logger.warning(f"Postgres Full-Text query error: {e}. Falling back to standard filters.")
-
-    # Standard database fallback (MySQL/SQLite)
-    query = Q()
-    for word in words:
-        query |= Q(title__icontains=word)
-    candidates = Product.objects.filter(
-        seller=seller_user,
-        status="ACTIVE"
-    ).filter(query)[:10]
-
-    results = []
-    for p in candidates:
-        title_words = extract_keywords(p.title)
-        if not title_words:
-            continue
-        matched_tokens = sum(1 for w in title_words if w in words)
-        score = matched_tokens / len(title_words)
-        if score >= 0.5:
-            results.append((p, score))
-    return results
 
 
 @transaction.atomic
@@ -189,54 +89,98 @@ def detect_and_create_enquiry(interaction):
     if current_meta.get("crm_processed") is True:
         return None
 
-    customer = interaction.customer
+    # Thread-safe retrieval and lock of the customer to update metrics
+    customer = Customer.objects.select_for_update().get(id=interaction.customer.id)
     seller_account = interaction.seller_account
     seller_user = seller_account.user
 
     if not seller_user:
+        logger.warning(f"[CRM MATCH] Unable to process CRM matching. No seller user linked to account {seller_account.id}")
         return None
+
+    # Update customer interaction metrics
+    customer.total_interactions += 1
+    customer.last_interaction_at = timezone.now()
+    customer_update_fields = ["total_interactions", "last_interaction_at"]
 
     matched_products = []  # List of tuples: (product, confidence_score, matched_media_id)
     media_id = extract_media_id_safely(interaction.event_type, current_meta)
+    clean_media_id = str(media_id).strip() if media_id else None
 
-    # 1. Matching via direct media attachment IDs
-    if media_id:
+    logger.info(f"[CRM MATCH] Processing interaction {interaction.id}. Extracted media_id: {clean_media_id}")
+
+    # Determine confidence score points based on activity signal intensity
+    if interaction.event_type == "DM":
+        initial_confidence = 0.5
+        score_increment = 0.2
+    elif interaction.event_type == "COMMENT":
+        initial_confidence = 0.3
+        score_increment = 0.1
+    else:
+        initial_confidence = 0.2
+        score_increment = 0.1
+
+    # Matching strictly via direct media IDs querying the product table media_id field
+    if clean_media_id:
         products = Product.objects.filter(
             seller=seller_user,
-            source_id=media_id,
+            media_id=clean_media_id,
             status="ACTIVE"
         )
+        product_count = products.count()
+        logger.info(f"[CRM MATCH] Querying product with media_id='{clean_media_id}'. Found {product_count} database matches.")
+        
         for product in products:
-            matched_products.append((product, 1.0, media_id))
+            matched_products.append((product, initial_confidence, clean_media_id))
+            
+        # DIAGNOSTIC ENGINE: Runs if no match was found to check setup issues
+        if product_count == 0:
+            raw_products = Product.objects.filter(media_id=clean_media_id)
+            if raw_products.exists():
+                for rp in raw_products:
+                    logger.warning(
+                        f"[CRM DIAGNOSTIC] Product with media_id='{clean_media_id}' exists in DB but did not match! "
+                        f"Checking reasons -> "
+                        f"Product Seller: {rp.seller} (Expected: {seller_user}), "
+                        f"Product Status: '{rp.status}' (Expected: 'ACTIVE')"
+                    )
+            else:
+                logger.warning(
+                    f"[CRM DIAGNOSTIC] Absolutely no product exists in your database with media_id='{clean_media_id}'."
+                )
+    else:
+        logger.info(f"[CRM MATCH] No media ID extracted from interaction {interaction.id}. Skipping product matching.")
 
-    # 2. Matching via database keyword searches
-    if not matched_products and interaction.message_text:
-        words = extract_keywords(interaction.message_text)
-        if words:
-            candidates = query_active_products(seller_user, words)
-            for product, score in candidates:
-                matched_products.append((product, score, None))
-
-    logger.info(f"Matching results for Interaction {interaction.id}: found {len(matched_products)} candidates.")
-
+    # STRICT GUARD: If no active product matches this interaction, exit early without creating an Enquiry
     if not matched_products:
-        # Mark interaction as evaluated but unmatched to avoid future duplicate evaluation
+        logger.info(f"[CRM MATCH] No active product matched for media_id '{clean_media_id}'. Skipping Enquiry creation.")
+        
+        # Save customer interaction metrics updates (counting the interaction only)
+        customer.save(update_fields=customer_update_fields)
+
+        # Flag interaction processing state
         current_meta["crm_processed"] = True
         current_meta["crm_processed_at"] = timezone.now().isoformat()
         interaction.metadata = current_meta
         interaction.save(update_fields=["metadata"])
         return None
 
-    # Locking selection to prevent parallel request race conditions
-    enquiry = Enquiry.objects.select_for_update().filter(
-        owner=seller_account,
-        customer=customer,
-        status__in=['OPEN', 'ACTIVE']
-    ).first()
+    # Build context-specific enquiry filter based on the media ID
+    enquiry_filter = {
+        "owner": seller_account,
+        "customer": customer,
+        "media_id": clean_media_id,
+        "status__in": ['OPEN', 'ACTIVE']
+    }
+
+    # Locking selection to find an existing active enquiry for this customer context
+    enquiry = Enquiry.objects.select_for_update().filter(**enquiry_filter).first()
 
     if not enquiry:
+        msg_text = interaction.message_text or ""
+        snippet = msg_text[:30] + "..." if len(msg_text) > 30 else msg_text
+
         first_product = matched_products[0][0]
-        snippet = interaction.message_text[:30] + "..." if len(interaction.message_text) > 30 else interaction.message_text
         title_text = f"[{interaction.event_type}] Interest in {first_product.title or 'Product'} - '{snippet}'"
 
         try:
@@ -249,42 +193,54 @@ def detect_and_create_enquiry(interaction):
                     status='OPEN',
                     title=title_text[:255],
                     priority='MEDIUM',
-                    media_id=matched_products[0][2] or media_id,
+                    media_id=clean_media_id,
                     assigned_to=seller_user
                 )
-                logger.info(f"Created new open Enquiry {enquiry.id} for Customer {customer.id}.")
+                logger.info(f"Created new open Enquiry {enquiry.id} for Customer {customer.id} on media_id {clean_media_id}.")
+                
+                # Increment customer's total enquiries metric on brand new creations
+                customer.total_enquiries += 1
+                customer_update_fields.append("total_enquiries")
+
         except IntegrityError:
-            # Concurrence fallback: retrieve the enquiry created concurrently by the competing thread
-            enquiry = Enquiry.objects.select_for_update().filter(
-                owner=seller_account,
-                customer=customer,
-                status__in=['OPEN', 'ACTIVE']
-            ).first()
+            # Concurrency fallback: retrieve the enquiry created concurrently by the competing thread
+            enquiry = Enquiry.objects.select_for_update().filter(**enquiry_filter).first()
             logger.info(f"Concurrent collision handled. Reusing Enquiry {enquiry.id} for Customer {customer.id}.")
     else:
-        logger.info(f"Re-using existing active Enquiry {enquiry.id} for Customer {customer.id}.")
-        if not enquiry.media_id and media_id:
-            enquiry.media_id = media_id
-            enquiry.save(update_fields=['media_id'])
+        logger.info(f"Re-using existing active Enquiry {enquiry.id} for Customer {customer.id} with media_id {clean_media_id}.")
 
-    # Log matches under CRM using standard 24-hour product limits to suppress spam 
+    # Save the customer statistics updates
+    customer.save(update_fields=customer_update_fields)
+
+    # Save or update matching products to the CRM
     for product, confidence, _ in matched_products:
-        cooldown_threshold = timezone.now() - datetime.timedelta(hours=24)
-        
-        already_tracked = EnquiryProduct.objects.filter(
-            enquiry__customer=customer,
-            product=product,
-            created_at__gte=cooldown_threshold
-        ).exists()
+        # Use select_for_update() to lock and read the most up-to-date score from the database
+        enquiry_product = EnquiryProduct.objects.select_for_update().filter(
+            enquiry=enquiry,
+            product=product
+        ).first()
 
-        if not already_tracked:
-            EnquiryProduct.objects.get_or_create(
+        if enquiry_product:
+            current_score = enquiry_product.confidence_score or 0.0
+            new_score = min(current_score + score_increment, 1.0)
+            enquiry_product.confidence_score = new_score
+            enquiry_product.save(update_fields=["confidence_score"])
+            
+            logger.info(
+                f"[CRM MATCH] Increased confidence score for EnquiryProduct {enquiry_product.id} "
+                f"from {current_score} by {score_increment} (Activity: {interaction.event_type}) to {enquiry_product.confidence_score}"
+            )
+        else:
+            # If the product is not yet linked, create a new record using the baseline score for this action
+            enquiry_product = EnquiryProduct.objects.create(
                 enquiry=enquiry,
                 product=product,
-                defaults={
-                    'is_active': True,
-                    'confidence_score': confidence
-                }
+                is_active=True,
+                confidence_score=confidence or initial_confidence
+            )
+            logger.info(
+                f"[CRM MATCH] Created new EnquiryProduct {enquiry_product.id} for Enquiry {enquiry.id} "
+                f"and Product {product.id} with initial confidence {enquiry_product.confidence_score}"
             )
 
     # Flag interaction processing state
@@ -294,7 +250,6 @@ def detect_and_create_enquiry(interaction):
     interaction.save(update_fields=["metadata"])
 
     return enquiry
-
 
 @method_decorator(csrf_exempt, name="dispatch")
 class InstagramWebhookView(View):
@@ -347,6 +302,8 @@ class InstagramWebhookView(View):
             return HttpResponse("Invalid signature", status=403)
 
         payload = json.loads(raw_body.decode("utf-8"))
+
+        print(payload)
 
         if payload.get("object") != "instagram":
             return HttpResponse("IGNORED")
@@ -418,38 +375,89 @@ class InstagramWebhookView(View):
                             msg_data = event["message"]
                             mid = msg_data.get("mid")
 
-                            if mid and CustomerInteraction.objects.filter(instagram_event_id=mid).exists():
+                            if mid and CustomerInteraction.objects.filter(
+                                instagram_event_id=mid
+                            ).exists():
                                 continue
 
                             text_content = msg_data.get("text", "")[:1000]
+                            attachments = msg_data.get("attachments", [])
+
+                            message_type = "TEXT"
+                            media_url = None
+                            media_id = None
+
+                            if attachments:
+                                attachment = attachments[0]
+                                attachment_type = attachment.get("type")
+                                payload = attachment.get("payload", {})
+
+                                if attachment_type == "image":
+                                    message_type = "IMAGE"
+
+                                elif attachment_type == "video":
+                                    message_type = "VIDEO"
+
+                                elif attachment_type == "audio":
+                                    message_type = "AUDIO"
+
+                                elif attachment_type == "file":
+                                    message_type = "FILE"
+
+                                elif attachment_type == "ig_post":
+                                    media_id = payload.get("ig_post_media_id")
+
+                                    # If Instagram later exposes carousel info
+                                    title = (payload.get("title") or "").lower()
+                                    if "carousel" in title:
+                                        message_type = "CAROUSEL"
+                                    else:
+                                        message_type = "POST"
+
+                                elif attachment_type == "ig_reel":
+                                    message_type = "REEL"
+                                    media_id = payload.get("reel_video_id")
+
+                                media_url = payload.get("url")
 
                             interaction = CustomerInteraction.objects.create(
                                 customer=customer,
                                 seller_account=owner_account,
                                 event_type="DM",
                                 direction=direction,
+                                message_type=message_type,
                                 message_text=text_content,
+                                media_url=media_url,
+                                media_id=media_id,
                                 instagram_event_id=mid,
                                 platform_timestamp=platform_timestamp,
                                 metadata={
                                     "crm_processed": False,
-                                    "attachments": msg_data.get("attachments", []),
+                                    "attachments": attachments,
                                     "reply_to": msg_data.get("reply_to"),
                                     "is_echo": msg_data.get("is_echo", False),
                                 }
                             )
 
-                            # Trigger asynchronous processing (NEVER fallback synchronous in webhook threads)
+                            # Trigger processing (tries asynchronous execution, falls back to synchronous execution)
                             if CELERY_AVAILABLE:
                                 try:
                                     process_enquiry_background_task.delay(interaction.id)
                                 except Exception as e:
                                     logger.error(
                                         f"Celery delivery failure for ID {interaction.id}. "
-                                        f"Item saved safely. Task will be processed by background reconciliation. Error: {e}"
+                                        f"Attempting synchronous fallback matching. Error: {e}"
                                     )
+                                    try:
+                                        detect_and_create_enquiry(interaction)
+                                    except Exception as sync_err:
+                                        logger.error(f"Synchronous fallback failed for interaction {interaction.id}: {sync_err}", exc_info=True)
                             else:
-                                logger.warning(f"Celery task is offline. Interaction {interaction.id} recorded safely.")
+                                logger.warning(f"Celery task is offline. Executing synchronous matching fallback.")
+                                try:
+                                    detect_and_create_enquiry(interaction)
+                                except Exception as sync_err:
+                                    logger.error(f"Synchronous execution failed for interaction {interaction.id}: {sync_err}", exc_info=True)
 
                         # -------------------------
                         # REACTION
@@ -514,9 +522,20 @@ class InstagramWebhookView(View):
                                 try:
                                     process_enquiry_background_task.delay(interaction.id)
                                 except Exception as e:
-                                    logger.error(f"Celery task delivery failed for Postback Interaction {interaction.id}. Error: {e}")
+                                    logger.error(
+                                        f"Celery task delivery failed for Postback Interaction {interaction.id}. "
+                                        f"Attempting synchronous matching fallback. Error: {e}"
+                                    )
+                                    try:
+                                        detect_and_create_enquiry(interaction)
+                                    except Exception as sync_err:
+                                        logger.error(f"Synchronous fallback failed for Postback: {sync_err}", exc_info=True)
                             else:
-                                logger.warning(f"Celery task is offline. Interaction {interaction.id} recorded safely.")
+                                logger.warning(f"Celery task is offline. Processing postback synchronously.")
+                                try:
+                                    detect_and_create_enquiry(interaction)
+                                except Exception as sync_err:
+                                    logger.error(f"Synchronous execution failed for Postback: {sync_err}", exc_info=True)
 
                         # -------------------------
                         # READ
@@ -526,6 +545,8 @@ class InstagramWebhookView(View):
                             CustomerInteraction.objects.filter(
                                 instagram_event_id=read.get("mid")
                             ).update(is_read=True)
+
+                        
 
                     except Exception as event_err:
                         logger.error(f"Error handling event payload: {event_err}", exc_info=True)
@@ -548,7 +569,7 @@ class InstagramWebhookView(View):
                         comment_id = value.get("id")
                         media_info = value.get("media", {})
                         parent_id = value.get("parent_id")
-
+                        
                         # Comment idempotency check
                         if comment_id and CustomerInteraction.objects.filter(instagram_event_id=comment_id).exists():
                             continue
@@ -589,6 +610,7 @@ class InstagramWebhookView(View):
                                 customer=customer,
                                 seller_account=owner_account,
                                 event_type="COMMENT",
+                                media_id=media_info.get("id"),
                                 direction=direction,
                                 message_text=text[:1000] if text else "",
                                 instagram_event_id=comment_id,
@@ -605,9 +627,20 @@ class InstagramWebhookView(View):
                                 try:
                                     process_enquiry_background_task.delay(interaction.id)
                                 except Exception as e:
-                                    logger.error(f"Celery task delivery failed for Comment Interaction {interaction.id}. Error: {e}")
+                                    logger.error(
+                                        f"Celery task delivery failed for Comment Interaction {interaction.id}. "
+                                        f"Attempting synchronous fallback matching. Error: {e}"
+                                    )
+                                    try:
+                                        detect_and_create_enquiry(interaction)
+                                    except Exception as sync_err:
+                                        logger.error(f"Synchronous fallback failed for Comment: {sync_err}", exc_info=True)
                             else:
-                                logger.warning(f"Celery task is offline. Interaction {interaction.id} recorded safely.")
+                                logger.warning(f"Celery task is offline. Processing Comment synchronously.")
+                                try:
+                                    detect_and_create_enquiry(interaction)
+                                except Exception as sync_err:
+                                    logger.error(f"Synchronous execution failed for Comment: {sync_err}", exc_info=True)
 
                     except Exception as change_err:
                         logger.error(f"Error handling comments/changes: {change_err}", exc_info=True)
@@ -636,8 +669,3 @@ class InstagramWebhookView(View):
         incoming = signature_header[7:]
 
         return hmac.compare_digest(expected, incoming)
-
-
-
-
-
